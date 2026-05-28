@@ -1,0 +1,137 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+@font-face {
+  font-family: 'Minecraftia';
+  src: url('/src/fonts/Minecraftia-Regular.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+/* inter-regular - latin */
+@font-face {
+  font-display: swap;
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  src: url("./fonts/inter-v20-latin-regular.woff2") format("woff2");
+}
+@font-face {
+  font-display: swap;
+  font-family: "Minecraft";
+  font-style: normal;
+  font-weight: 400;
+  src: url("./fonts/Minecraft Ten.woff2") format("woff2");
+}
+
+@theme {
+  --font-inter: "Inter", sans-serif;
+  --font-minecraftia: "Minecraftia", monospace;
+  --font-minecraft: "Minecraft", sans-serif;
+}
+
+:root,
+.light,
+.default,
+[data-theme="light"],
+[data-theme="default"] {
+  /* Theme Colors (Light Mode) */
+  --accent: oklch(76.9% 0.19 152.44);
+  --accent-foreground: oklch(15% 0.03 152.44);
+  --background: oklch(97.02% 0.02 152.44);
+  --border: oklch(90% 0.02 152.44);
+  --danger: oklch(65.32% 0.2421 13.57);
+  --danger-foreground: oklch(99.11% 0 0);
+  --default: oklch(94% 0.02 152.44);
+  --default-foreground: oklch(21.03% 0.0059 152.44);
+  --field-background: oklch(100% 0.01 152.44);
+  --field-foreground: oklch(21.03% 0.02 152.44);
+  --field-placeholder: oklch(55.17% 0.04 152.44);
+  --focus: oklch(76.9% 0.19 152.44);
+  --foreground: oklch(21.03% 0.02 152.44);
+  --muted: oklch(55.17% 0.04 152.44);
+  --overlay: oklch(100% 0.006 152.44);
+  --overlay-foreground: oklch(21.03% 0.02 152.44);
+  --scrollbar: oklch(87.1% 0.02 152.44);
+  --segment: oklch(100% 0.02 152.44);
+  --segment-foreground: oklch(21.03% 0.02 152.44);
+  --separator: oklch(92% 0.02 152.44);
+  --success: oklch(73.29% 0.2012 138.64);
+  --success-foreground: oklch(21.03% 0.0059 138.64);
+  --surface: oklch(100% 0.01 152.44);
+  --surface-foreground: oklch(21.03% 0.02 152.44);
+  --surface-secondary: oklch(95.24% 0.016 152.44);
+  --surface-secondary-foreground: oklch(21.03% 0.02 152.44);
+  --surface-tertiary: oklch(93.73% 0.016 152.44);
+  --surface-tertiary-foreground: oklch(21.03% 0.02 152.44);
+  --warning: oklch(78.19% 0.1648 60.16);
+  --warning-foreground: oklch(21.03% 0.0059 60.16);
+
+  /* Border Radius */
+  --radius: 0.125rem;
+  --field-radius: 0.25rem;
+
+  /* Font Family */
+  --font-sans: var(--font-inter);
+}
+
+.dark,
+[data-theme="dark"] {
+  color-scheme: dark;
+  /* Theme Colors (Dark Mode) */
+  --accent: oklch(76.9% 0.19 152.44);
+  --accent-foreground: oklch(15% 0.03 152.44);
+  --background: oklch(12% 0.02 152.44);
+  --border: oklch(28% 0.02 152.44);
+  --danger: oklch(59.4% 0.2046 12.46);
+  --danger-foreground: oklch(99.11% 0 0);
+  --default: oklch(27.4% 0.02 152.44);
+  --default-foreground: oklch(99.11% 0 0);
+  --field-background: oklch(21.03% 0.04 152.44);
+  --field-foreground: oklch(99.11% 0.02 152.44);
+  --field-placeholder: oklch(70.5% 0.04 152.44);
+  --focus: oklch(76.9% 0.19 152.44);
+  --foreground: oklch(99.11% 0.02 152.44);
+  --muted: oklch(70.5% 0.04 152.44);
+  --overlay: oklch(21.03% 0.04 152.44);
+  --overlay-foreground: oklch(99.11% 0.02 152.44);
+  --scrollbar: oklch(70.5% 0.02 152.44);
+  --segment: oklch(39.64% 0.02 152.44);
+  --segment-foreground: oklch(99.11% 0.02 152.44);
+  --separator: oklch(25% 0.02 152.44);
+  --success: oklch(73.29% 0.2012 138.64);
+  --success-foreground: oklch(21.03% 0.0059 138.64);
+  --surface: oklch(21.03% 0.04 152.44);
+  --surface-foreground: oklch(99.11% 0.02 152.44);
+  --surface-secondary: oklch(25.7% 0.03 152.44);
+  --surface-secondary-foreground: oklch(99.11% 0.02 152.44);
+  --surface-tertiary: oklch(27.21% 0.03 152.44);
+  --surface-tertiary-foreground: oklch(99.11% 0.02 152.44);
+  --warning: oklch(82.03% 0.1444 64.17);
+  --warning-foreground: oklch(21.03% 0.0059 64.17);
+}
+
+* {
+  user-select: none;
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
+}
+
+*[data-tauri-drag-region] {
+  app-region: drag;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #081e0f;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2e4d35;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #18281c;
+}

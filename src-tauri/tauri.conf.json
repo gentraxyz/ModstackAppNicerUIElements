@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0-rc",
+  "productName": "Modstack App",
+  "version": "1.0.2",
+  "identifier": "ModstackApp",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Modstack App",
+        "width": 1080,
+        "height": 620,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "center": true,
+        "x": null,     
+        "y": null,
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/**", "$HOME/**", "**"]
+      }
+    }
+  },
+  "bundle": {
+    "createUpdaterArtifacts": true,
+    "active": true,
+    "targets": "all",
+    "licenseFile": "./LICENSE.rtf",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["mrstack"],
+        "name": "MRStack File",
+        "description": "MRStack File",
+        "mimeType": "application/x-mrstack"
+      }
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE5RTE2REQyMUFCNkJCMjkKUldRcHU3WWEwbTNoR1FoNUw3NTZLUVc2alhEYWFldEYzeHUvbkZaOEYyeGFpb1ByUXJkOE01QXMK",
+      "endpoints": [
+        "https://cdn.stackedhost.crysistudio.xyz/modstack/release/latest/update.json"
+      ]
+    }
+  }
+}

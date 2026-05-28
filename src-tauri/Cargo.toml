@@ -1,0 +1,60 @@
+[package]
+name = "ModstackApp"
+version = "1.0.2"
+description = "Modstack"
+authors = ["primeCigarrete"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2.0.5", features = [] }
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-log = "2"
+tauri-plugin-shell = "2.3"
+lyceris = "1.1.2"
+futures = "0.3"
+reqwest = { version = "0.12", features = ["stream", "json", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+zip = "0.6"
+futures-util = "0.3"
+walkdir = "2"
+serde_json = "1"
+dirs = "5"
+md5 = "0.7"
+urlencoding = "2"
+sysinfo = "0.30.11"
+oauth2 = { version = "5.0.0", default-features = false, features = ["reqwest", "rustls-tls"] }
+open = "5"
+url = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+flate2 = "1"
+tar = "0.4"
+tauri-plugin-fs = "2"
+base64 = "0.22"
+discord-rich-presence = "0.2"
+tauri-plugin-dialog = "2"
+chrono = { version = "0.4", features = ["serde"] }
+tauri-plugin-single-instance = "2"
+rsa = { version = "0.9", features = ["sha2"] }
+sha1 = { version = "0.10", features = ["oid"] }
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+
+mc_bootstrap = { path = "../crates/mc_bootstrap" }
+mc_downloader = { path = "../crates/mc_downloader" }
+mc_service = { path = "../crates/mc_service" }
+minecraft-msa-auth = { path = "../crates/minecraft-msa-auth" }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+
+[profile.release]
+windows_subsystem = "windows"
