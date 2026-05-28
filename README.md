@@ -180,7 +180,6 @@ This source code is made available for **reading and personal reference only** u
 - Sell, sublicense, or otherwise commercialize this software or any derivative of it
 - Redistribute this code, in whole or in part, whether modified or unmodified, publicly or privately to third parties
 - Publish, host, or release a fork or modified version of this project without explicit written permission from the author
-- Use this code as the basis for another launcher or competing product
 
 Any use not explicitly permitted above is prohibited. For licensing inquiries or permission requests, contact the author directly.
 
