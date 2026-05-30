@@ -159,12 +159,12 @@ export default function NavBar() {
             )
           }
         </NavButton>
-        <NavButton path="instances" label="Instances">
-          <IconBox className="size-6" />
-        </NavButton>
         
         <NavButton path="server_browser" label="Server Browser">
           <Server className="size-6" />
+        </NavButton>
+        <NavButton path="instances" label="Instances">
+          <IconBox className="size-6" />
         </NavButton>
         {instances.length > 0 && (
           <div className="w-full h-px bg-white/10 my-1" />
