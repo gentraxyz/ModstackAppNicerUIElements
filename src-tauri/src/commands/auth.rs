@@ -50,11 +50,11 @@ pub async fn login_microsoft() -> Result<Value, String> {
                     <html lang="es">
                     <head>
                     <meta charset="UTF-8" />
-                    <title>Modstack Auth Success</title>
+                    <title>Modstack Login Success</title>
                     <style>
                       body {
                         margin: 0;
-                        background: #121212;
+                        background: #0f1923;
                         color: white;
                         font-family: Helvetica, Arial, sans-serif;
                         display: flex;
@@ -76,8 +76,8 @@ pub async fn login_microsoft() -> Result<Value, String> {
                     <body>
                       <div class="card">
                         <div class="check">&#10004;</div>
-                        <h1>Authentication complete</h1>
-                        <p>You can close this window</p>
+                        <h1>Login Complete</h1>
+                        <p>You can safely close this page now</p>
                       </div>
                       <script>setTimeout(() => window.close(), 1500);</script>
                     </body>
