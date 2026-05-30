@@ -24,6 +24,7 @@ interface DownloadItem {
 function DownloadsPopup() {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
   const [open, setOpen] = useState(false);
+  const [userClosed, setUserClosed] = useState(false);
   const popupRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -35,26 +36,45 @@ function DownloadsPopup() {
       );
     });
 
-    const unlistenStatus = listen<{ status: string; instanceId?: string }>(
-      "install-status",
-      (event) => {
-        const { status, instanceId } = event.payload as { status: string; instanceId?: string };
-        const safeStatus = status || "Downloading...";
-        setOpen(true);
-        setDownloads((prev) => {
-          const exists = prev.find((d) => d.id === "install");
-          if (!exists) {
-            return [
-              ...prev,
-              { id: "install", name: "Modstack", instanceId, progress: 0, status: safeStatus },
-            ];
-          }
-          return prev.map((d) =>
-            d.id === "install" ? { ...d, status: safeStatus, instanceId } : d
-          );
-        });
+    const unlistenAssetInstance = listen<string>("asset-instance", (event) => {
+      setDownloads((prev) =>
+        prev.map((d) =>
+          d.id === "assets" ? { ...d, name: event.payload } : d
+        )
+      );
+    });
+
+    const unlistenStatus = listen<string>("install-status", (event) => {
+      const raw = event.payload;
+      let status = "";
+      let instanceId: string | undefined;
+      try {
+        const parsed = JSON.parse(raw);
+        status = parsed.status ?? raw;
+        instanceId = parsed.instanceId;
+      } catch {
+        status = raw;
       }
-    );
+      const safeStatus = status || "Downloading...";
+      setDownloads((prev) => {
+        const exists = prev.find((d) => d.id === "install");
+        if (!exists) {
+          return [
+            ...prev,
+            { id: "install", name: instanceId ?? "Modstack", instanceId, progress: 0, status: safeStatus },
+          ];
+        }
+        return prev.map((d) =>
+          d.id === "install"
+            ? { ...d, status: safeStatus, name: instanceId ?? d.name, instanceId: instanceId ?? d.instanceId }
+            : d
+        );
+      });
+      setUserClosed((closed) => {
+        if (!closed) setOpen(true);
+        return closed;
+      });
+    });
 
     const unlistenDone = listen("install-done", () => {
       setDownloads((prev) =>
@@ -62,13 +82,13 @@ function DownloadsPopup() {
       );
       setTimeout(() => {
         setDownloads((prev) => prev.filter((d) => d.id !== "install"));
+        setUserClosed(false);
       }, 1500);
     });
 
     const unlistenAsset = listen<string>("asset-progress", (event) => {
       const [current, total] = event.payload.split("/").map(Number);
       const progress = Math.floor((current / total) * 100);
-      setOpen(true);
       setDownloads((prev) => {
         const exists = prev.find((d) => d.id === "assets");
         if (!exists) {
@@ -78,47 +98,64 @@ function DownloadsPopup() {
           ];
         }
         return prev.map((d) =>
-          d.id === "assets"
-            ? { ...d, progress, name: d.instanceId ? `${d.instanceId} Assets` : "Assets" }
-            : d
+          d.id === "assets" ? { ...d, progress } : d
         );
+      });
+      setUserClosed((closed) => {
+        if (!closed) setOpen(true);
+        return closed;
       });
       if (current === total) {
         setTimeout(() => {
           setDownloads((prev) => prev.filter((d) => d.id !== "assets"));
+          setUserClosed(false);
         }, 1500);
       }
     });
 
-    const unlistenAssetStatus = listen<{ status: string; instanceId?: string }>(
-      "asset-status",
-      (event) => {
-        const { status, instanceId } = event.payload as { status: string; instanceId?: string };
-        const safeStatus = status || "Downloading assets";
-        setOpen(true);
-        setDownloads((prev) => {
-          const exists = prev.find((d) => d.id === "assets");
-          if (!exists) {
-            return [
-              ...prev,
-              { id: "assets", name: instanceId ? `${instanceId} Assets` : "Assets", instanceId, progress: 0, status: safeStatus },
-            ];
-          }
-          return prev.map((d) =>
-            d.id === "assets"
-              ? { ...d, status: safeStatus, instanceId, name: instanceId ? `${instanceId} Assets` : "Assets" }
-              : d
-          );
-        });
+    const unlistenAssetStatus = listen<string>("asset-status", (event) => {
+      const raw = event.payload;
+      let status = "";
+      let instanceId: string | undefined;
+      try {
+        const parsed = JSON.parse(raw);
+        status = parsed.status ?? raw;
+        instanceId = parsed.instanceId;
+      } catch {
+        status = raw;
       }
-    );
+      const safeStatus = status || "Downloading assets";
+      setDownloads((prev) => {
+        const exists = prev.find((d) => d.id === "assets");
+        if (!exists) {
+          return [
+            ...prev,
+            {
+              id: "assets",
+              name: instanceId ?? "Assets",
+              instanceId,
+              progress: 0,
+              status: safeStatus,
+            },
+          ];
+        }
+        return prev.map((d) =>
+          d.id === "assets"
+            ? { ...d, status: safeStatus, instanceId, name: instanceId ?? d.name }
+            : d
+        );
+      });
+      setUserClosed((closed) => {
+        if (!closed) setOpen(true);
+        return closed;
+      });
+    });
 
     const unlistenJavaStart = listen<{ version: number }>(
       "java-download-start",
       (event) => {
         const { version } = event.payload;
         const id = `java-${version}`;
-        setOpen(true);
         setDownloads((prev) => {
           const exists = prev.find((d) => d.id === id);
           if (!exists) {
@@ -128,6 +165,10 @@ function DownloadsPopup() {
             ];
           }
           return prev;
+        });
+        setUserClosed((closed) => {
+          if (!closed) setOpen(true);
+          return closed;
         });
       }
     );
@@ -167,12 +208,14 @@ function DownloadsPopup() {
         );
         setTimeout(() => {
           setDownloads((prev) => prev.filter((d) => d.id !== id));
+          setUserClosed(false);
         }, 1500);
       }
     );
 
     return () => {
       unlistenProgress.then((f) => f());
+      unlistenAssetInstance.then((f) => f());
       unlistenStatus.then((f) => f());
       unlistenDone.then((f) => f());
       unlistenAsset.then((f) => f());
@@ -185,13 +228,18 @@ function DownloadsPopup() {
   }, []);
 
   useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (popupRef.current && !popupRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    if (open) document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    if (!open) return;
+    const timer = setTimeout(() => {
+      const handler = (e: MouseEvent) => {
+        if (popupRef.current && !popupRef.current.contains(e.target as Node)) {
+          setOpen(false);
+          setUserClosed(true);
+        }
+      };
+      document.addEventListener("mousedown", handler);
+      return () => document.removeEventListener("mousedown", handler);
+    }, 0);
+    return () => clearTimeout(timer);
   }, [open]);
 
   if (downloads.length === 0) return null;
@@ -202,7 +250,10 @@ function DownloadsPopup() {
         variant="ghost"
         size="lg"
         isIconOnly
-        onPress={() => setOpen((v) => !v)}
+        onPress={() => {
+          setOpen((v) => !v);
+          setUserClosed(false);
+        }}
         className="relative rounded-none ring-inset"
         aria-label="View active downloads"
       >
@@ -220,7 +271,10 @@ function DownloadsPopup() {
             <Button
               variant="ghost"
               isIconOnly
-              onPress={() => setOpen(false)}
+              onPress={() => {
+                setOpen(false);
+                setUserClosed(true);
+              }}
               className="size-5 rounded"
             >
               <IconX size={12} />
@@ -230,11 +284,9 @@ function DownloadsPopup() {
           <div className="flex flex-col gap-3 px-3 py-3">
             {downloads.map((item) => (
               <div key={item.id} className="flex flex-col gap-1">
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-sm font-semibold text-foreground">
-                    {item.instanceId ? `${item.instanceId} ${item.name}` : item.name}
-                  </span>
-                </div>
+                <span className="text-sm font-semibold text-foreground">
+                  {item.name}
+                </span>
 
                 <ProgressBar value={item.progress}>
                   <ProgressBar.Track>

@@ -874,6 +874,160 @@ fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
     Ok(())
 }
 
+async fn install_neoforge(
+    mc_version: &str,
+    instance_id: &str,
+    engine: &PathBuf,
+    java: &PathBuf,
+    app: &AppHandle,
+    log_id: &str,
+) -> Result<String, String> {
+    // Fetch available versions from maven metadata
+    let xml = reqwest::get(
+        "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
+    )
+    .await.map_err(|e| e.to_string())?
+    .text()
+    .await.map_err(|e| e.to_string())?;
+
+    let mc_parts: Vec<&str> = mc_version.splitn(3, '.').collect();
+
+    let neo_prefix = if mc_parts[0] == "1" && mc_parts.len() >= 3 {
+        format!("{}.{}.", mc_parts[1], mc_parts[2])
+    } else if mc_parts[0] == "1" && mc_parts.len() == 2 {
+        format!("{}.", mc_parts[1])
+    } else {
+        format!("{}.{}.", mc_parts[0], mc_parts[1])
+    };
+
+    ilog!(app, log_id, "NeoForge prefix: '{}'", neo_prefix);
+
+    let all_versions: Vec<String> = xml
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("<version>")
+                .and_then(|s| s.strip_suffix("</version>"))
+                .map(|s| s.to_string())
+        })
+        .filter(|v| v.starts_with(&neo_prefix))
+        .collect();
+
+    ilog!(app, log_id, "NeoForge versions found: {}", all_versions.len());
+
+    let neo_version = all_versions.iter()
+        .filter(|v| !v.contains("beta") && !v.contains("alpha"))
+        .last()
+        .or_else(|| all_versions.last())
+        .ok_or_else(|| format!("No NeoForge version for MC {} (prefix: {})", mc_version, neo_prefix))?
+        .clone();
+
+    ilog!(app, log_id, "Selected NeoForge version: {}", neo_version);
+
+    let neo_work_dir = engine.join(format!("neoforge_installer_{}", mc_version));
+    if neo_work_dir.exists() {
+        let _ = fs::remove_dir_all(&neo_work_dir);
+    }
+    fs::create_dir_all(&neo_work_dir)
+        .map_err(|e| format!("Could not create neoforge_installer dir: {}", e))?;
+
+    // Download installer
+    let installer_url = format!(
+        "https://maven.neoforged.net/releases/net/neoforged/neoforge/{}/neoforge-{}-installer.jar",
+        neo_version, neo_version
+    );
+    let installer_path = neo_work_dir.join(format!("neoforge-{}-installer.jar", neo_version));
+    ilog!(app, log_id, "Downloading NeoForge installer: {}", installer_url);
+    download(&installer_url, &installer_path).await?;
+
+    let launcher_profiles = neo_work_dir.join("launcher_profiles.json");
+    fs::write(
+        &launcher_profiles,
+        r#"{
+            "profiles": {},
+            "selectedProfile": null,
+            "clientToken": "modstack",
+            "authenticationDatabase": {}
+        }"#,
+    ).map_err(|e| format!("Could not create launcher_profiles.json: {}", e))?;
+
+    let java_exe = if cfg!(windows) {
+        java.parent()
+            .ok_or("Could not get java bin dir")?
+            .join("javaw.exe")
+    } else {
+        java.clone()
+    };
+    let java_home = java_exe
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or("Could not determine JAVA_HOME")?;
+
+    ilog!(app, log_id, "Running NeoForge installer...");
+    let output = {
+        let mut c = Command::new(&java_exe);
+        c.current_dir(&neo_work_dir)
+            .arg(format!("-Djava.home={}", java_home.display()))
+            .arg("-Djava.net.preferIPv4Stack=true")
+            .arg("-Djava.awt.headless=true")
+            .arg("-jar")
+            .arg(&installer_path)
+            .arg("--installClient")
+            .arg(&neo_work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .env("_JAVA_OPTIONS", "-Djava.awt.headless=true");
+        #[cfg(windows)]
+        c.creation_flags(0x08000000);
+        c.output()
+            .map_err(|e| format!("Could not run NeoForge installer: {}", e))?
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ilog!(app, log_id, "NeoForge installer exit: {:?}", output.status.code());
+    ilog!(app, log_id, "stdout: {}", &stdout[..stdout.len().min(1000)]);
+    if !stderr.is_empty() {
+        ilog!(app, log_id, "stderr: {}", &stderr[..stderr.len().min(1000)]);
+    }
+
+    if !output.status.success() {
+        return Err(format!(
+            "NeoForge {} installer failed (exit {:?})\nstdout: {}\nstderr: {}",
+            neo_version, output.status.code(), stdout, stderr
+        ));
+    }
+
+    let neo_versions_src = neo_work_dir.join("versions");
+    if neo_versions_src.exists() {
+        copy_dir_all(&neo_versions_src, &engine.join("versions"))
+            .map_err(|e| format!("Error copying NeoForge versions: {}", e))?;
+        ilog!(app, log_id, "NeoForge versions copied");
+    } else {
+        ilog!(app, log_id, "Warn: no versions dir found after NeoForge install");
+    }
+
+    let neo_libs_src = neo_work_dir.join("libraries");
+    let engine_libs_dest = engine.join("libraries").join(instance_id).join(mc_version);
+    if engine_libs_dest.exists() {
+        let _ = fs::remove_dir_all(&engine_libs_dest);
+    }
+    fs::create_dir_all(&engine_libs_dest)
+        .map_err(|e| format!("Could not create NeoForge libs dest: {}", e))?;
+    if neo_libs_src.exists() {
+        copy_dir_all(&neo_libs_src, &engine_libs_dest)
+            .map_err(|e| format!("Error copying NeoForge libraries: {}", e))?;
+        ilog!(app, log_id, "NeoForge libraries copied");
+    } else {
+        ilog!(app, log_id, "Warn: no libraries dir found after NeoForge install");
+    }
+
+    let _ = fs::remove_dir_all(&neo_work_dir);
+    ilog!(app, log_id, "NeoForge {} installed successfully", neo_version);
+    Ok(neo_version)
+}
+
 async fn install_fabric(
     version: &str,
     engine_libs: &PathBuf,
@@ -1245,7 +1399,30 @@ pub async fn launch_instance_cmd(
             ilog!(&app, &log_id, "Forge already installed for {}", version);
         }
     }
+    
+    if loader == "neoforge" {
+        let neoforge_already_installed = fs::read_dir(engine.join("versions"))
+            .map(|d| {
+                d.flatten().any(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.contains("neoforge") && name.starts_with(&format!("{}-", version))
+                })
+            })
+            .unwrap_or(false);
 
+        let engine_libs_empty = fs::read_dir(&engine_libs)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true);
+
+        if !neoforge_already_installed || engine_libs_empty {
+            ilog!(&app, &log_id, "Installing NeoForge for {}...", version);
+            let _ = fs::remove_dir_all(&engine_libs);
+            install_neoforge(&version, &instance_id, &engine, &java, &app, &log_id).await?;
+        } else {
+            ilog!(&app, &log_id, "NeoForge already installed for {}", version);
+        }
+    }
+        
     let (fabric_main_class, fabric_libs) = if loader == "fabric" {
         ilog!(
             &app,
@@ -1293,6 +1470,7 @@ pub async fn launch_instance_cmd(
             let objects_dir = objects_dir.clone();
             let app = app.clone();
             let count = &count;
+            let instance_name = instance.name.clone();
             async move {
                 let hash = obj["hash"].as_str().unwrap();
                 let subdir = &hash[0..2];
@@ -1313,6 +1491,7 @@ pub async fn launch_instance_cmd(
                 }
                 let c = count.fetch_add(1, Ordering::Relaxed) + 1;
                 app.emit("asset-progress", format!("{}/{}", c, total)).ok();
+                app.emit("asset-instance", &instance_name).ok();
             }
         })
         .await;
@@ -1378,20 +1557,58 @@ pub async fn launch_instance_cmd(
         cmd.arg(agent_arg);
     }
 
-    if loader == "forge" {
+    if loader == "forge" || loader == "neoforge" {
         let versions_dir = engine.join("versions");
+    
+        let available: Vec<String> = fs::read_dir(&versions_dir)
+            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
+            .unwrap_or_default();
+        ilog!(&app, &log_id, "Dirs en engine/versions: {:?}", available);
 
-        let forge_version_entry = fs::read_dir(&versions_dir)
-            .map_err(|e| e.to_string())?
-            .filter_map(Result::ok)
-            .find(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                name.starts_with(&format!("{}-", version)) && name.contains("forge")
-            })
-            .ok_or_else(|| format!("Forge version directory not found for {}.", version))?;
-
-        let forge_dir = forge_version_entry.path();
-        let forge_version_name = forge_dir.file_name().unwrap().to_string_lossy().to_string();
+        for entry in fs::read_dir(&versions_dir).unwrap_or_else(|_| fs::read_dir(".").unwrap()).filter_map(Result::ok) {
+            let dir_path = entry.path();
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            if dir_path.is_dir() {
+                let contents: Vec<String> = fs::read_dir(&dir_path)
+                    .map(|d| d.flatten().map(|f| f.file_name().to_string_lossy().to_string()).collect())
+                    .unwrap_or_default();
+                ilog!(&app, &log_id, "versions/{}: {:?}", dir_name, contents);
+            }
+        }
+        
+        let (forge_dir, forge_version_name) = if loader == "neoforge" {
+            // Log all available version dirs to see what the installer created
+            let all_dirs: Vec<String> = fs::read_dir(&versions_dir)
+                .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
+                .unwrap_or_default();
+            ilog!(&app, &log_id, "All version dirs available: {:?}", all_dirs);
+        
+            let entry = fs::read_dir(&versions_dir)
+                .map_err(|e| e.to_string())?
+                .filter_map(Result::ok)
+                .find(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.contains("neoforge") || name.contains("fml")
+                })
+                .ok_or_else(|| format!("NeoForge version directory not found for {}.", version))?;
+            let dir_path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            ilog!(&app, &log_id, "NeoForge using version dir: {}", name);
+            (dir_path, name)
+        } else {
+            let entry = fs::read_dir(&versions_dir)
+                .map_err(|e| e.to_string())?
+                .filter_map(Result::ok)
+                .find(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.starts_with(&format!("{}-", version)) && name.contains("forge")
+                })
+                .ok_or_else(|| format!("Forge version directory not found for {}.", version))?;
+            let dir_path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            (dir_path, name)
+        };
+        
         let forge_json_path = forge_dir.join(format!("{}.json", forge_version_name));
 
         let forge_json_str = fs::read_to_string(&forge_json_path)
@@ -1576,6 +1793,10 @@ pub async fn launch_instance_cmd(
         let sep = if cfg!(windows) { ";" } else { ":" };
         let mut cp_parts: Vec<String> = vec![jar.to_string_lossy().to_string()];
 
+        ilog!(&app, &log_id, "gameDir: {}", instance_dir.display());
+        ilog!(&app, &log_id, "mods exists: {}", instance_dir.join("mods").exists());
+        ilog!(&app, &log_id, "mods count: {}", fs::read_dir(instance_dir.join("mods")).map(|d| d.count()).unwrap_or(0));
+
         if cache_libs.exists() {
             for entry in WalkDir::new(&cache_libs).into_iter().filter_map(Result::ok) {
                 let path = entry.path();
@@ -1700,25 +1921,44 @@ pub async fn launch_instance_cmd(
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-
-    let output = cmd
-        .output()
+    
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Error launching Minecraft: {}", e))?;
-
-    ilog!(&app, &log_id, "EXIT CODE: {:?}", output.status.code());
-    ilog!(
-        &app,
-        &log_id,
-        "STDERR: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    ilog!(
-        &app,
-        &log_id,
-        "STDOUT: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-
+    
+    {
+        let mut pid = state.minecraft_pid.lock().unwrap();
+        *pid = Some(child.id());
+    }
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    
+    let app_stdout = app.clone();
+    let log_id_stdout = log_id.clone();
+    if let Some(stdout) = stdout {
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().flatten() {
+                ilog!(&app_stdout, &log_id_stdout, "{}", line);
+            }
+        });
+    }
+    
+    let app_stderr = app.clone();
+    let log_id_stderr = log_id.clone();
+    if let Some(stderr) = stderr {
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                ilog!(&app_stderr, &log_id_stderr, "{}", line);
+            }
+        });
+    }
+    
+    child.wait().map_err(|e| format!("Error waiting for Minecraft: {}", e))?;
+    
     app.emit("minecraft-closed", ()).ok();
     Ok(())
 }
@@ -2184,24 +2424,37 @@ pub async fn export_local_instance(
 
 #[command(rename_all = "camelCase")]
 pub async fn import_mrstack(app: AppHandle, mrstack_path: String) -> Result<LocalInstance, String> {
+    let extension = std::path::Path::new(&mrstack_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match extension.as_str() {
+        "mrpack" => import_mrpack_file(&app, &mrstack_path).await,
+        "zip" => import_curseforge_zip(&app, &mrstack_path).await,
+        _ => import_mrstack_file(&app, &mrstack_path),
+    }
+}
+
+fn import_mrstack_file(app: &AppHandle, path: &str) -> Result<LocalInstance, String> {
     use std::io::Read;
 
-    let zip_bytes = fs::read(&mrstack_path).map_err(|e| format!("Could not read file: {}", e))?;
+    let zip_bytes = fs::read(path).map_err(|e| format!("Could not read file: {}", e))?;
     let cursor = std::io::Cursor::new(zip_bytes);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| format!("Not a valid .mrstack: {}", e))?;
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("Not a valid .mrstack: {}", e))?;
 
     let raw_json = {
-        let mut f = archive
-            .by_name("instance.json")
+        let mut f = archive.by_name("instance.json")
             .map_err(|_| "Missing instance.json in archive")?;
         let mut s = String::new();
         f.read_to_string(&mut s).map_err(|e| e.to_string())?;
         s
     };
 
-    let mut inst: LocalInstance =
-        serde_json::from_str(&raw_json).map_err(|e| format!("Invalid instance.json: {}", e))?;
+    let mut inst: LocalInstance = serde_json::from_str(&raw_json)
+        .map_err(|e| format!("Invalid instance.json: {}", e))?;
 
     let existing = load_local_instances(app.clone());
     if existing.iter().any(|i| i.id == inst.id) {
@@ -2209,35 +2462,25 @@ pub async fn import_mrstack(app: AppHandle, mrstack_path: String) -> Result<Loca
     }
     inst.created_at = chrono::Utc::now().timestamp_millis();
 
-    let dest_dir = instance_dir(&app, &inst.id);
+    let dest_dir = instance_dir(app, &inst.id);
     fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
     init_instance_dirs(&dest_dir)?;
-
     inst.icon_path = None;
     inst.background_path = None;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         let name = entry.name().to_string();
-        if name == "instance.json" {
-            continue;
-        }
-        if name.starts_with("assets/launcher/") {
-            continue;
-        }
+        if name == "instance.json" { continue; }
+        if name.starts_with("assets/launcher/") { continue; }
         if name.ends_with('/') {
-            let out_path = dest_dir.join(&name);
-            fs::create_dir_all(&out_path).ok();
+            fs::create_dir_all(dest_dir.join(&name)).ok();
             continue;
         }
         if name.starts_with("assets/") {
-            let fname = PathBuf::from(&name)
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if fname.is_empty() {
-                continue;
-            }
+            let fname = PathBuf::from(&name).file_name()
+                .map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+            if fname.is_empty() { continue; }
             let out_path = dest_dir.join(&fname);
             let mut out_file = fs::File::create(&out_path)
                 .map_err(|e| format!("Error creating {}: {}", fname, e))?;
@@ -2250,16 +2493,253 @@ pub async fn import_mrstack(app: AppHandle, mrstack_path: String) -> Result<Loca
             continue;
         }
         let out_path = dest_dir.join(&name);
-        if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent).ok();
-        }
-        let mut out_file =
-            fs::File::create(&out_path).map_err(|e| format!("Error creating {}: {}", name, e))?;
+        if let Some(parent) = out_path.parent() { fs::create_dir_all(parent).ok(); }
+        let mut out_file = fs::File::create(&out_path)
+            .map_err(|e| format!("Error creating {}: {}", name, e))?;
         std::io::copy(&mut entry, &mut out_file).map_err(|e| e.to_string())?;
     }
 
     let updated_json = serde_json::to_string_pretty(&inst).map_err(|e| e.to_string())?;
-    fs::write(instance_json_path(&app, &inst.id), updated_json).map_err(|e| e.to_string())?;
+    fs::write(instance_json_path(app, &inst.id), updated_json).map_err(|e| e.to_string())?;
+    Ok(inst)
+}
+
+async fn import_mrpack_file(app: &AppHandle, path: &str) -> Result<LocalInstance, String> {
+    use std::io::Read;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let zip_bytes = fs::read(path).map_err(|e| format!("Could not read .mrpack: {}", e))?;
+    let cursor = std::io::Cursor::new(&zip_bytes);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("Not a valid .mrpack: {}", e))?;
+
+    let index: serde_json::Value = {
+        let mut f = archive.by_name("modrinth.index.json")
+            .map_err(|_| "Missing modrinth.index.json")?;
+        let mut s = String::new();
+        f.read_to_string(&mut s).map_err(|e| e.to_string())?;
+        serde_json::from_str(&s).map_err(|e| e.to_string())?
+    };
+
+    let pack_name = index["name"].as_str().unwrap_or("Imported Pack").to_string();
+    let mc_version = index["dependencies"]["minecraft"].as_str()
+        .unwrap_or("unknown").to_string();
+    let loader = if index["dependencies"]["fabric-loader"].is_string() {
+        "fabric"
+    } else if index["dependencies"]["forge"].is_string() {
+        "forge"
+    } else if index["dependencies"]["neoforge"].is_string() {
+        "neoforge"
+    } else if index["dependencies"]["quilt-loader"].is_string() {
+        "quilt"
+    } else {
+        "vanilla"
+    }.to_string();
+
+    let id = format!("mrpack-{}-{}",
+        slugify_export(&pack_name),
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    );
+    let created_at = SystemTime::now().duration_since(UNIX_EPOCH)
+        .unwrap_or_default().as_millis() as i64;
+
+    let dest_dir = instance_dir(app, &id);
+    fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    init_instance_dirs(&dest_dir)?;
+
+    let files = index["files"].as_array().cloned().unwrap_or_default();
+    let total = files.len();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build().unwrap_or_default();
+
+    app.emit("install-status", format!("Downloading {} files...", total)).ok();
+
+    let count = std::sync::atomic::AtomicUsize::new(0);
+    stream::iter(files)
+        .for_each_concurrent(32, |file| {
+            let client = client.clone();
+            let dest_dir = dest_dir.clone();
+            let app = app.clone();
+            let count = &count;
+            async move {
+                let file_path = file["path"].as_str().unwrap_or("").to_string();
+                if file_path.is_empty() { count.fetch_add(1, Ordering::Relaxed); return; }
+                let dest = dest_dir.join(&file_path);
+                if let Some(parent) = dest.parent() { fs::create_dir_all(parent).ok(); }
+                if dest.exists() {
+                    let c = count.fetch_add(1, Ordering::Relaxed) + 1;
+                    app.emit("install-progress", format!("{}/{}", c, total)).ok();
+                    return;
+                }
+                let downloads = file["downloads"].as_array().cloned().unwrap_or_default();
+                for dl in &downloads {
+                    if let Some(url) = dl.as_str() {
+                        if let Ok(resp) = client.get(url).send().await {
+                            if let Ok(bytes) = resp.bytes().await {
+                                fs::write(&dest, &bytes).ok();
+                                break;
+                            }
+                        }
+                    }
+                }
+                let c = count.fetch_add(1, Ordering::Relaxed) + 1;
+                app.emit("install-progress", format!("{}/{}", c, total)).ok();
+            }
+        })
+        .await;
+
+    app.emit("install-status", "Extracting overrides...").ok();
+    let cursor2 = std::io::Cursor::new(&zip_bytes);
+    let mut archive2 = zip::ZipArchive::new(cursor2).map_err(|e| e.to_string())?;
+    for i in 0..archive2.len() {
+        let mut entry = archive2.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        if !name.starts_with("overrides/") { continue; }
+        let rel = name.trim_start_matches("overrides/");
+        if rel.is_empty() { continue; }
+        let out_path = dest_dir.join(rel);
+        if name.ends_with('/') {
+            fs::create_dir_all(&out_path).ok();
+        } else {
+            if let Some(parent) = out_path.parent() { fs::create_dir_all(parent).ok(); }
+            if let Ok(mut out_file) = fs::File::create(&out_path) {
+                std::io::copy(&mut entry, &mut out_file).ok();
+            }
+        }
+    }
+
+    app.emit("install-status", "").ok();
+    app.emit("install-done", &id).ok();
+
+    let inst = LocalInstance {
+        id: id.clone(),
+        title: pack_name,
+        minecraft_version: mc_version,
+        loader,
+        icon_path: None,
+        background_path: None,
+        created_at,
+    };
+    let json = serde_json::to_string_pretty(&inst).map_err(|e| e.to_string())?;
+    fs::write(instance_json_path(app, &id), json).map_err(|e| e.to_string())?;
+    Ok(inst)
+}
+
+async fn import_curseforge_zip(app: &AppHandle, path: &str) -> Result<LocalInstance, String> {
+    use std::io::Read;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let zip_bytes = fs::read(path).map_err(|e| format!("Could not read zip: {}", e))?;
+    let cursor = std::io::Cursor::new(&zip_bytes);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("Not a valid zip: {}", e))?;
+
+    let manifest: serde_json::Value = {
+        let mut f = archive.by_name("manifest.json")
+            .map_err(|_| "Missing manifest.json — is this a CurseForge modpack?")?;
+        let mut s = String::new();
+        f.read_to_string(&mut s).map_err(|e| e.to_string())?;
+        serde_json::from_str(&s).map_err(|e| e.to_string())?
+    };
+
+    let pack_name = manifest["name"].as_str().unwrap_or("Imported Pack").to_string();
+    let mc_version = manifest["minecraft"]["version"].as_str()
+        .unwrap_or("unknown").to_string();
+    let loader = manifest["minecraft"]["modLoaders"]
+        .as_array()
+        .and_then(|l| l.iter().find(|m| m["primary"].as_bool().unwrap_or(false)))
+        .and_then(|m| m["id"].as_str())
+        .and_then(|id| id.split('-').next())
+        .unwrap_or("forge")
+        .to_string();
+
+    let id = format!("cf-{}-{}",
+        slugify_export(&pack_name),
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    );
+    let created_at = SystemTime::now().duration_since(UNIX_EPOCH)
+        .unwrap_or_default().as_millis() as i64;
+
+    let dest_dir = instance_dir(app, &id);
+    fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    init_instance_dirs(&dest_dir)?;
+
+    let files = manifest["files"].as_array().cloned().unwrap_or_default();
+    let total = files.len();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build().unwrap_or_default();
+    let cf_api_key = "$2a$10$piVONlDwyu/KXz.jZDFQ/eEdKEBmLYfEDK7vlLixtgevppSHQm06C";
+    let mods_dir = dest_dir.join("mods");
+    fs::create_dir_all(&mods_dir).ok();
+
+    app.emit("install-status", format!("Downloading {} mods...", total)).ok();
+
+    for (i, file) in files.iter().enumerate() {
+        let project_id = file["projectID"].as_u64().unwrap_or(0);
+        let file_id = file["fileID"].as_u64().unwrap_or(0);
+        if project_id == 0 || file_id == 0 { continue; }
+
+        let api_url = format!(
+            "https://api.curseforge.com/v1/mods/{}/files/{}/download-url",
+            project_id, file_id
+        );
+        if let Ok(resp) = client.get(&api_url)
+            .header("x-api-key", cf_api_key)
+            .send().await
+        {
+            if let Ok(data) = resp.json::<serde_json::Value>().await {
+                if let Some(url) = data["data"].as_str() {
+                    let filename = url.split('/').last().unwrap_or("mod.jar").to_string();
+                    let dest = mods_dir.join(&filename);
+                    if !dest.exists() {
+                        if let Ok(r) = client.get(url).send().await {
+                            if let Ok(bytes) = r.bytes().await {
+                                fs::write(&dest, &bytes).ok();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        app.emit("install-progress", format!("{}/{}", i + 1, total)).ok();
+    }
+
+    app.emit("install-status", "Extracting overrides...").ok();
+    let cursor2 = std::io::Cursor::new(&zip_bytes);
+    let mut archive2 = zip::ZipArchive::new(cursor2).map_err(|e| e.to_string())?;
+    for i in 0..archive2.len() {
+        let mut entry = archive2.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        if !name.starts_with("overrides/") { continue; }
+        let rel = name.trim_start_matches("overrides/");
+        if rel.is_empty() { continue; }
+        let out_path = dest_dir.join(rel);
+        if name.ends_with('/') {
+            fs::create_dir_all(&out_path).ok();
+        } else {
+            if let Some(parent) = out_path.parent() { fs::create_dir_all(parent).ok(); }
+            if let Ok(mut out_file) = fs::File::create(&out_path) {
+                std::io::copy(&mut entry, &mut out_file).ok();
+            }
+        }
+    }
+
+    app.emit("install-status", "").ok();
+    app.emit("install-done", &id).ok();
+
+    let inst = LocalInstance {
+        id: id.clone(),
+        title: pack_name,
+        minecraft_version: mc_version,
+        loader,
+        icon_path: None,
+        background_path: None,
+        created_at,
+    };
+    let json = serde_json::to_string_pretty(&inst).map_err(|e| e.to_string())?;
+    fs::write(instance_json_path(app, &id), json).map_err(|e| e.to_string())?;
     Ok(inst)
 }
 
@@ -2285,11 +2765,12 @@ pub async fn install_modrinth_modpack(
     slug: String,
     title: String,
     icon_url: Option<String>,
+    version_id: Option<String>,
 ) -> Result<LocalInstance, String> {
     use std::io::Read;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let id = format!("{}", slug);
+    let id = format!("{}-{}", slug, version_id.as_deref().unwrap_or("latest"));
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -2330,20 +2811,6 @@ pub async fn install_modrinth_modpack(
         .await
         .map_err(|e| e.to_string())?;
 
-    let mc_version = project["game_versions"]
-        .as_array()
-        .and_then(|v| v.last())
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    let loader = project["loaders"]
-        .as_array()
-        .and_then(|v| v.first())
-        .and_then(|v| v.as_str())
-        .unwrap_or("fabric")
-        .to_string();
-
     let background_path = {
         let gallery = project["gallery"].as_array();
         let gallery_url = gallery
@@ -2376,8 +2843,7 @@ pub async fn install_modrinth_modpack(
         }
     };
 
-    app.emit("install-status", "Fetching modpack version...")
-        .ok();
+    app.emit("install-status", "Fetching modpack version...").ok();
 
     let versions: serde_json::Value = client
         .get(format!(
@@ -2392,12 +2858,45 @@ pub async fn install_modrinth_modpack(
         .await
         .map_err(|e| e.to_string())?;
 
-    let latest = versions
+    let target_version = if let Some(vid) = &version_id {
+        versions
+            .as_array()
+            .and_then(|v| v.iter().find(|ver| ver["id"].as_str() == Some(vid)))
+            .ok_or("Specified version not found")?
+    } else {
+        versions
+            .as_array()
+            .and_then(|v| v.first())
+            .ok_or("No modpack versions found")?
+    };
+
+    let mc_version = target_version["game_versions"]
+        .as_array()
+        .and_then(|v| v.last())
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            project["game_versions"]
+                .as_array()
+                .and_then(|v| v.last())
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+        })
+        .to_string();
+
+    let loader = target_version["loaders"]
         .as_array()
         .and_then(|v| v.first())
-        .ok_or("No modpack versions found")?;
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            project["loaders"]
+                .as_array()
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or("fabric")
+        })
+        .to_string();
 
-    let mrpack_url = latest["files"]
+    let mrpack_url = target_version["files"]
         .as_array()
         .and_then(|files| {
             files.iter().find(|f| {
@@ -2462,8 +2961,7 @@ pub async fn install_modrinth_modpack(
                 }
                 if dest.exists() {
                     let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-                    app.emit("install-progress", format!("{}/{}", c, total))
-                        .ok();
+                    app.emit("install-progress", format!("{}/{}", c, total)).ok();
                     return;
                 }
                 let downloads = file["downloads"].as_array().cloned().unwrap_or_default();
@@ -2478,8 +2976,7 @@ pub async fn install_modrinth_modpack(
                     }
                 }
                 let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-                app.emit("install-progress", format!("{}/{}", c, total))
-                    .ok();
+                app.emit("install-progress", format!("{}/{}", c, total)).ok();
             }
         })
         .await;
@@ -2529,4 +3026,90 @@ pub async fn install_modrinth_modpack(
     let json = serde_json::to_string_pretty(&inst).map_err(|e| e.to_string())?;
     fs::write(instance_json_path(&app, &id), json).map_err(|e| e.to_string())?;
     Ok(inst)
+}
+
+#[command]
+pub fn register_local_instance_for_launch(
+    app: AppHandle,
+    id: String,
+    loader: String,
+    version: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let path = instance_dir(&app, &id);
+    let mut manager = state.instances.lock().unwrap();
+    manager.instances.retain(|i| i.id != id);
+    manager.create_instance(
+        id.clone(),
+        id.clone(),
+        path,
+        loader,
+        version,
+        None,
+        None,
+        None,
+        None,
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldInfo {
+    pub name: String,
+    pub folder_name: String,
+    pub last_played: i64,
+    pub icon_path: Option<String>,
+}
+
+#[command]
+pub fn get_instance_worlds(app: AppHandle, instance_id: String) -> Vec<WorldInfo> {
+    let saves_dir = instance_dir(&app, &instance_id).join("saves");
+    println!("Looking for worlds in: {}", saves_dir.display());
+    if !saves_dir.exists() {
+        return vec![];
+    }
+    let mut worlds: Vec<WorldInfo> = fs::read_dir(&saves_dir)
+        .unwrap_or_else(|_| fs::read_dir(".").unwrap())
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| {
+            let folder_name = e.file_name().to_string_lossy().to_string();
+            let path = e.path();
+            let icon_path = path.join("icon.png");
+            let last_played = e.metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
+                .unwrap_or(0);
+            WorldInfo {
+                name: folder_name.clone(),
+                folder_name,
+                last_played,
+                icon_path: if icon_path.exists() {
+                    Some(icon_path.to_string_lossy().to_string())
+                } else {
+                    None
+                },
+            }
+        })
+        .collect();
+    worlds.sort_by(|a, b| b.last_played.cmp(&a.last_played));
+    worlds
+}
+
+#[command]
+pub fn kill_minecraft(state: State<'_, AppState>) -> Result<(), String> {
+    let pid = state.minecraft_pid.lock().unwrap().take();
+    if let Some(pid) = pid {
+        #[cfg(windows)]
+        {
+            Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .output().ok();
+        }
+        #[cfg(not(windows))]
+        {
+            Command::new("kill").arg(pid.to_string()).output().ok();
+        }
+    }
+    Ok(())
 }

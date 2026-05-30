@@ -11,7 +11,6 @@ import { useSettings } from "./settingsContext";
 import { toast } from "@heroui/react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { appDataDir } from "@tauri-apps/api/path";
 import { getInstances, getInstance } from "../api/instances";
 
 const InstanceContext = createContext({
@@ -26,7 +25,7 @@ const InstanceContext = createContext({
   selectInstanceByCode: (_code: string) => {},
   fetchInstances: () => {},
   isRunning: false,
-  isLaunched: false,
+  launchedInstanceId: null as string | null, 
   installProgress: 0,
   installStatus: "",
 });
@@ -68,7 +67,7 @@ export function InstanceProvider({
   const { user } = useAuth();
   const { maxRAM, windowWidth, windowHeight, fullscreen } = useSettings();
   const [isRunning, setIsRunning] = useState(false);
-  const [isLaunched, setIsLaunched] = useState(false);
+  const [launchedInstanceId, setLaunchedInstanceId] = useState<string | null>(null);
   const [installProgress, setInstallProgress] = useState(0);
   const [installStatus, setInstallStatus] = useState("");
 
@@ -167,7 +166,7 @@ export function InstanceProvider({
 
       unlistenClosed = await listen("minecraft-closed", () => {
         setIsRunning(false);
-        setIsLaunched(false);
+        setLaunchedInstanceId(null);
         setInstallProgress(0);
         setInstallStatus("");
         invoke("discord_set_idle");
@@ -201,7 +200,17 @@ export function InstanceProvider({
       console.error("Error uninstalling instance", e);
     }
 
+    if ((instance as any)._isLocal) {
+      try {
+        await invoke("remove_local_instance", { id: instance.id });
+      } catch (e) {
+        console.error("Error removing local instance files", e);
+      }
+    }
+
     setInstalledInstances((prev) => prev.filter((i) => i.id !== instance.id));
+    
+    setInstances((prev) => prev.filter((i) => i.id !== instance.id));
 
     const isCodeInstance = !!localStorage.getItem(instance.id);
     if (isCodeInstance) {
@@ -322,8 +331,8 @@ export function InstanceProvider({
 
         const effectiveLoader = loaderEnabled ? loaderType : "vanilla";
 
-        const dataDir = await appDataDir();
-        const instancesDir = `${dataDir}instances`;
+        const installDir = await invoke<string>("get_install_dir");
+        const instancesDir = `${installDir.replace(/[\\/]$/, "")}/instances`;
 
         console.log(
           `[Launch] id=${instance.id} version=${instance.minecraft_version} loader=${effectiveLoader} offline=${isOffline} noPremium=${noPremiumAllowed}`,
@@ -338,40 +347,49 @@ export function InstanceProvider({
           instance.landscape ??
           null;
 
-        await invoke("create_instance", {
-          name: instance.id,
-          id: instance.id,
-          basePath: instancesDir,
-          loader: effectiveLoader,
-          version: instance.minecraft_version,
-          slug: instance.slug ?? null,
-          landscape: featuredLandscape,
-        });
-
-        setInstalledInstances((prev) => {
-          if (prev.find((i) => i.id === instance.id)) return prev;
-          return [...prev, instance];
-        });
-
-        setInstallStatus("Downloading mods...");
-        setInstallProgress(0);
-
-        try {
-          await invoke("install_instance_files", {
-            instanceId: instance.id,
-            instanceCode: localStorage.getItem(instance.id) ?? null,
+        if (isLocal) {
+          await invoke("create_instance", {
+            name: instance.id,
+            id: instance.id,
+            basePath: instancesDir,
+            loader: effectiveLoader,
+            version: instance.minecraft_version,
+            slug: instance.slug ?? null,
+            landscape: featuredLandscape,
           });
-        } catch (installErr) {
-          console.warn(
-            "[Install] Error downloading files, continuing anyway:",
-            installErr,
-          );
+        } else {
+          await invoke("create_instance", {
+            name: instance.id,
+            id: instance.id,
+            basePath: instancesDir,
+            loader: effectiveLoader,
+            version: instance.minecraft_version,
+            slug: instance.slug ?? null,
+            landscape: featuredLandscape,
+          });
+        
+          setInstalledInstances((prev) => {
+            if (prev.find((i) => i.id === instance.id)) return prev;
+            return [...prev, instance];
+          });
+        
+          setInstallStatus("Downloading mods...");
+          setInstallProgress(0);
+        
+          try {
+            await invoke("install_instance_files", {
+              instanceId: instance.id,
+              instanceCode: localStorage.getItem(instance.id) ?? null,
+            });
+          } catch (installErr) {
+            console.warn("[Install] Error downloading files, continuing anyway:", installErr);
+          }
         }
 
         setInstallProgress(0);
         setInstallStatus("");
 
-        setIsLaunched(true);
+        setLaunchedInstanceId(instance.id);
 
         await invoke("discord_set_playing", {
           name: instance.title || instance.id,
@@ -413,11 +431,11 @@ export function InstanceProvider({
         });
 
         setIsRunning(false);
-        setIsLaunched(false);
+        setLaunchedInstanceId(null);
         
       } catch (err) {
         setIsRunning(false);
-        setIsLaunched(false);
+        setLaunchedInstanceId(null);
         setInstallProgress(0);
         setInstallStatus("");
         console.error("Error launching instance:", err);
@@ -444,7 +462,7 @@ export function InstanceProvider({
           selectInstanceByCode,
           fetchInstances,
           isRunning,
-          isLaunched,
+          launchedInstanceId,
           installProgress,
           installStatus,
         } as any

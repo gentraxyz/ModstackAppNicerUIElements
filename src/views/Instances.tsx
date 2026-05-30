@@ -93,7 +93,7 @@ interface InstanceLog {
 const LOADER_EMOJI: Record<Loader, string> = {
   vanilla: "🌿", fabric: "🧵", forge: "⚒️", neoforge: "🔥",
 };
-const LOADERS: Loader[] = ["vanilla", "fabric", "forge"];
+const LOADERS: Loader[] = ["vanilla", "fabric", "forge", "neoforge"];
 
 const SORT_OPTIONS = ["Relevance", "Downloads", "Follows", "Newest", "Updated"];
 const VIEW_OPTIONS = ["10", "20", "50"];
@@ -356,7 +356,7 @@ function LoaderPill({ value, selected, onClick }: { value: Loader; selected: boo
       className={["flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-all",
         selected ? "bg-accent/15 border-accent/40 text-accent" : "bg-transparent border-border text-muted hover:text-foreground"].join(" ")}>
       {selected && <IconCheck size={11} />}
-      {value === "vanilla" ? "Vanilla" : value === "neoforge" ? "" : value.charAt(0).toUpperCase() + value.slice(1)}
+      {value.charAt(0).toUpperCase() + value.slice(1)}
     </button>
   );
 }
@@ -403,7 +403,7 @@ function useVersions() {
       .then(r => r.json())
       .then(data => {
         if (!alive) return;
-        setVersions((data?.versions ?? []).filter((v: McVersion) => v.type === "release" && /^1\.\d+(\.\d+)?$/.test(v.id)));
+        setVersions((data?.versions ?? []).filter((v: McVersion) => v.type === "release" && /^\d+\.\d+(\.\d+)?$/.test(v.id)));
       })
       .catch(() => {})
       .finally(() => { if (alive) setLoading(false); });
@@ -871,10 +871,15 @@ function ModpacksTab({ localInstances, onInstalled }: { localInstances: LocalIns
   useEffect(() => { search(page); }, [page, sortBy, viewCount, mcFilter]);
   const handleSearch = () => { setPage(0); search(0); };
 
-  const handleInstall = async (hit: ModrinthHit, _versionId?: string) => {
+  const handleInstall = async (hit: ModrinthHit, versionId?: string) => {
     setInstalling(hit.slug);
     try {
-      const inst = await invoke<LocalInstance>("install_modrinth_modpack", { slug: hit.slug, title: hit.title, iconUrl: hit.icon_url ?? null });
+      const inst = await invoke<LocalInstance>("install_modrinth_modpack", {
+        slug: hit.slug,
+        title: hit.title,
+        iconUrl: hit.icon_url ?? null,
+        versionId: versionId ?? null,
+      });
       onInstalled(inst);
       toast(`"${hit.title}" installed successfully`);
       setSelectedHit(null);
@@ -1606,6 +1611,58 @@ function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: b
   );
 }
 
+function WorldsTab({ instance }: { instance: LocalInstance }) {
+  const [worlds, setWorlds] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    console.log("WorldsTab: invoking get_instance_worlds for", instance.id); 
+    invoke<any[]>("get_instance_worlds", { instanceId: instance.id })
+      .then(w => { console.log("worlds result:", w); setWorlds(w); })
+      .catch(e => console.error("worlds error:", e))
+      .finally(() => setLoading(false));
+  }, [instance.id]);
+
+  if (loading) return (
+    <div className="flex items-center justify-center flex-1 h-full">
+      <IconRefresh size={20} className="text-muted animate-spin" />
+    </div>
+  );
+
+  if (worlds.length === 0) return (
+    <div className="flex flex-col items-center justify-center flex-1 h-full gap-3 opacity-40">
+      <IconBox size={36} className="text-muted" />
+      <p className="text-sm text-muted">No worlds found</p>
+    </div>
+  );
+
+  return (
+    <div className="flex-1 overflow-y-auto p-5">
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))" }}>
+        {worlds.map((world: any) => {
+          const iconUrl = world.icon_path ? convertFileSrc(world.icon_path) : null;
+          return (
+            <div key={world.folder_name}
+              className="flex items-center gap-3 p-3 rounded-[15px] border border-border"
+              style={{ backgroundColor: "var(--color-surface)" }}>
+              <div className="w-12 h-12 rounded-[10px] overflow-hidden flex-shrink-0 flex items-center justify-center border border-border"
+                style={{ backgroundColor: "var(--color-surface-secondary)" }}>
+                {iconUrl
+                  ? <img src={iconUrl} className="w-full h-full object-cover" alt="" />
+                  : <IconBox size={20} className="text-muted" />}
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-foreground truncate">{world.name}</p>
+                <p className="text-xs text-muted mt-0.5">{timeAgo(new Date(world.last_played * 1000).toISOString())}</p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function InstanceContentView({
   instance, onBackToMenu, onSwitchToDownload, onEdit, onExport, onOpenFolder,
 }: {
@@ -1613,7 +1670,8 @@ function InstanceContentView({
   onEdit: () => void; onExport: () => void; onOpenFolder: () => void;
 }) {
   const { user } = useAuth();
-  const { selectedInstance, launchInstance, isLaunched, installProgress, installStatus } = useInstance();
+  const { launchInstance, launchedInstanceId, installProgress, installStatus } = useInstance();
+  const isThisLaunched = launchedInstanceId === instance.id;
 
   const [filter, setFilter] = useState<ContentFilter>("all");
   const [search, setSearch] = useState("");
@@ -1623,14 +1681,15 @@ function InstanceContentView({
   const [instanceLogger, setInstanceLogger] = useState<InstanceLog[]>([]);
   const logRef = useRef<HTMLDivElement>(null);
 
+  
   const iconUrl = toUrl(instance.icon_path);
-  const instanceIdentifier = `${instance.id}-${instance.id}`;
+  const instanceIdentifier = `${instance.id}-`;
 
   const handlePlay = () => {
     if (!user) {
       return toast.danger("Sign in required", { description: "You must be signed in to play." });
     }
-    if (selectedInstance) launchInstance(selectedInstance);
+    launchInstance(instance as any);
   };
 
   useEffect(() => {
@@ -1714,11 +1773,15 @@ function InstanceContentView({
             <IconArrowLeft size={14} /> Main menu
           </button>
           <button
-            onClick={handlePlay}
-            disabled={isLaunched || installProgress > 0 || installStatus !== ""}
-            className="flex items-center gap-2 px-5 py-2 rounded-[12px] text-sm font-bold bg-[#22c55e] hover:bg-[#16a34a] text-black transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+            onClick={isThisLaunched ? () => invoke("kill_minecraft") : handlePlay}
+            disabled={installProgress > 0 || installStatus !== ""}
+            className={`flex items-center gap-2 px-5 py-2 rounded-[12px] text-sm font-bold text-black transition-colors disabled:opacity-50 disabled:cursor-not-allowed
+              ${isThisLaunched 
+                ? "bg-[#ef4444] hover:bg-[#dc2626]" 
+                : "bg-[#22c55e] hover:bg-[#16a34a]"
+              }`}>
             <IconPlayerPlay size={15} fill="currentColor" />
-            {installStatus !== "" || installProgress > 0 ? "Installing" : isLaunched ? "Playing" : "Play"}
+            {installStatus !== "" || installProgress > 0 ? "Installing" : isThisLaunched ? "Close" : "Play"}
           </button>
           <button onClick={onEdit} className="w-9 h-9 flex items-center justify-center rounded-[12px] border border-border text-muted hover:text-foreground hover:bg-white/5 transition-colors">
             <IconAdjustments size={17} />
@@ -1752,7 +1815,7 @@ function InstanceContentView({
         ))}
       </div>
 
-      {activeTab !== "Logs" && (
+      {activeTab !== "Logs" && activeTab !== "Worlds" && (
         <>
           <div className="flex items-center gap-2 px-5 py-2.5 border-b border-border flex-wrap">
             <div className="relative" style={{ minWidth: 180, flex: "1 1 180px", maxWidth: 500 }}>
@@ -1793,7 +1856,11 @@ function InstanceContentView({
         </>
       )}
 
-      {activeTab !== "Logs" && (
+      {activeTab === "Worlds" && (
+        <WorldsTab instance={instance} />
+      )}
+      
+      {activeTab !== "Logs" && activeTab !== "Worlds" && (
         <div className="flex-1 overflow-y-auto">
           {loadingMods ? (
             <div className="flex items-center justify-center h-full opacity-30"><IconRefresh size={24} className="text-muted animate-spin" /></div>
@@ -2259,24 +2326,30 @@ export default function Instances() {
       setContextInstances(next as any);  
       return next;
     });
-    setView("grid");
+    setView("grid"); 
     fetchInstances();
     toast.danger("Instance deleted");
   };
 
   const handleImport = async () => {
-    try {
-      const picked = await open({ multiple: false, filters: [{ name: "Modstack", extensions: ["mrstack"] }] });
-      if (!picked || typeof picked !== "string") return;
-      const inst = await invoke<LocalInstance>("import_mrstack", { mrstackPath: picked });
-      setInstances(prev => [inst, ...prev.filter(i => i.id !== inst.id)]);
-      setLocalSelectedId(inst.id);
-      setSelectedId(inst.id);
-      fetchInstances();
-      toast(`Instance "${inst.title}" imported successfully`);
-    } catch (e) {
-      if (!String(e).includes("cancelled")) toast.danger("Error importing", { description: String(e) });
-    }
+      try {
+        const picked = await open({
+          multiple: false,
+          filters: [{ 
+            name: "Modpack", 
+            extensions: ["mrstack", "mrpack", "zip"] 
+          }]
+        });
+        if (!picked || typeof picked !== "string") return;
+        const inst = await invoke<LocalInstance>("import_mrstack", { mrstackPath: picked });
+        setInstances(prev => [inst, ...prev.filter(i => i.id !== inst.id)]);
+        setLocalSelectedId(inst.id);
+        setSelectedId(inst.id);
+        fetchInstances();
+        toast(`Instance "${inst.title}" imported successfully`);
+      } catch (e) {
+        if (!String(e).includes("cancelled")) toast.danger("Error importing", { description: String(e) });
+      }
   };
 
   if (loading) {
