@@ -24,7 +24,7 @@ interface DownloadItem {
 function DownloadsPopup() {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
   const [open, setOpen] = useState(false);
-  const [userClosed, setUserClosed] = useState(false);
+  const [, setUserClosed] = useState(false);
   const popupRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

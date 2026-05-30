@@ -59,7 +59,7 @@ export default function Home() {
     launchInstance,
     selectInstanceByCode,
     isRunning,
-    isLaunched,
+    launchedInstanceId,
     installProgress,
     installStatus,
   } = useInstance();
@@ -262,7 +262,7 @@ export default function Home() {
           <Button
             isDisabled={
               !selectedInstance ||
-              isLaunched ||
+              launchedInstanceId === selectedInstance.id ||
               installProgress > 0 ||
               installStatus !== ""
             }
@@ -292,7 +292,7 @@ export default function Home() {
             {installStatus !== "" || installProgress > 0
               ? "Downloading"
               : isRunning
-                ? isLaunched
+                ? launchedInstanceId === selectedInstance?.id
                   ? "Playing"
                   : "Starting"
                 : "Play"}
