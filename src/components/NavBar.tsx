@@ -150,7 +150,14 @@ export default function NavBar() {
         <NavButton path="bedrock" label="Bedrock">
           <Pickaxe className="size-6" />
         </NavButton>
-        <NavButton path="skins" label="Skins">
+        <NavButton path="instances" label="Instances">
+          <IconBox className="size-6" />
+        </NavButton>
+        
+        <NavButton path="server_browser" label="Server Browser">
+          <Server className="size-6" />
+        </NavButton>
+                <NavButton path="skins" label="Skins">
           {(active) =>
             active ? (
               <IconShirtFilled className="size-6" />
@@ -158,13 +165,6 @@ export default function NavBar() {
               <IconShirt className="size-6" />
             )
           }
-        </NavButton>
-        <NavButton path="instances" label="Instances">
-          <IconBox className="size-6" />
-        </NavButton>
-        
-        <NavButton path="server_browser" label="Server Browser">
-          <Server className="size-6" />
         </NavButton>
         {instances.length > 0 && (
           <div className="w-full h-px bg-white/10 my-1" />

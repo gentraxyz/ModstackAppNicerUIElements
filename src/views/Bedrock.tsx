@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@heroui/react";
 import { listen } from "@tauri-apps/api/event";
 import NewsCarousel from "../components/NewsCarousel";
-import bedrockHero from "../assets/bedrock_hero.jpg";
+import bedrockHero from "../assets/modstack-bedrock.png";
 import {
   bedrockGetStatus,
   bedrockInstall,
@@ -10,6 +10,8 @@ import {
   BedrockStatus,
 } from "../utils/bedrock";
 import { useAuth } from "../stores/authContext";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 
 type PlayState =
   | "checking"
@@ -27,6 +29,25 @@ export default function Bedrock() {
   const [playState, setPlayState] = useState<PlayState>("checking");
   const [errorMsg, setErrorMsg] = useState("");
   const [showAlreadyInstalled, setShowAlreadyInstalled] = useState(false);
+  const [customBg, setCustomBg] = useState<string | null>(() => localStorage.getItem("bedrock_bg"));
+
+  const handlePickBg = async () => {
+    try {
+      const p = await open({
+        filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp"] }],
+      });
+      if (typeof p === "string") {
+        const url = convertFileSrc(p);
+        setCustomBg(url);
+        localStorage.setItem("bedrock_bg", url);
+      }
+    } catch {}
+  };
+
+  const handleRemoveBg = () => {
+    setCustomBg(null);
+    localStorage.removeItem("bedrock_bg");
+  };
 
   useEffect(() => {
     checkStatus();
@@ -128,15 +149,29 @@ export default function Bedrock() {
     <div className="w-full h-full flex flex-col min-h-0">
       <div className="flex-1 overflow-y-auto min-h-0">
 
-        <div className="w-full h-[50vh] overflow-hidden flex-shrink-0">
+        <div className="w-full h-[50vh] overflow-hidden flex-shrink-0 relative bg-black">
+
+          {customBg && (
+            <img
+              src={customBg}
+              alt="background"
+              className="w-full h-full object-cover"
+            />
+          )}
+
+          <div className="absolute inset-0 bg-black/20" />
+
           <img
             src={bedrockHero}
-            alt="Minecraft Bedrock"
-            className="w-full h-full object-cover"
+            alt="Modstack Bedrock"
+            className="absolute bottom-1 right-1 h-16 object-contain opacity-90 pointer-events-none select-none"
+            style={{ filter: "drop-shadow(0 4px 24px rgba(0,0,0,0.7))" }}
           />
+
         </div>
 
-        <div className="h-14 grid grid-cols-3 bg-surface-secondary shadow flex-shrink-0 sticky top-0 z-10">
+        <div className="h-14 grid grid-cols-3 bg-surface-secondary shadow flex-shrink-0 sticky top-0 z-10 overflow-visible">
+
           <div className="flex items-center px-4 text-sm text-foreground/50 select-none">
             {status?.version && <span>v{status.version}</span>}
           </div>
@@ -170,7 +205,24 @@ export default function Bedrock() {
             </span>
           </Button>
 
-          <div />
+          <div className="flex items-center justify-end px-4">
+            {customBg ? (
+              <button
+                onClick={handleRemoveBg}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[8px] text-xs text-foreground/60 hover:text-foreground bg-black/20 hover:bg-black/40 transition-colors border border-foreground/10"
+              >
+                <i className="ti ti-x" style={{ fontSize: 12 }} /> Remove background
+              </button>
+            ) : (
+              <button
+                onClick={handlePickBg}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[8px] text-xs text-foreground/60 hover:text-foreground bg-black/20 hover:bg-black/40 transition-colors border border-foreground/10"
+              >
+                <i className="ti ti-photo" style={{ fontSize: 13 }} /> Change background
+              </button>
+            )}
+          </div>
+
         </div>
 
         {playState === "error" && errorMsg && (

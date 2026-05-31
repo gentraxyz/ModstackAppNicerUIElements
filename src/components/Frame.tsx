@@ -16,6 +16,7 @@ import {
 interface DownloadItem {
   id: string;
   name: string;
+  title?: string;
   instanceId?: string;
   progress: number;
   status: string;
@@ -36,22 +37,17 @@ function DownloadsPopup() {
       );
     });
 
-    const unlistenAssetInstance = listen<string>("asset-instance", (event) => {
-      setDownloads((prev) =>
-        prev.map((d) =>
-          d.id === "assets" ? { ...d, name: event.payload } : d
-        )
-      );
-    });
-
     const unlistenStatus = listen<string>("install-status", (event) => {
+      console.log("install-status raw:", event.payload);
       const raw = event.payload;
       let status = "";
       let instanceId: string | undefined;
+      let title: string | undefined;
       try {
         const parsed = JSON.parse(raw);
         status = parsed.status ?? raw;
         instanceId = parsed.instanceId;
+        title = parsed.title;
       } catch {
         status = raw;
       }
@@ -61,12 +57,12 @@ function DownloadsPopup() {
         if (!exists) {
           return [
             ...prev,
-            { id: "install", name: instanceId ?? "Modstack", instanceId, progress: 0, status: safeStatus },
+            { id: "install", name: title ?? instanceId ?? "Modstack", instanceId, progress: 0, status: safeStatus },
           ];
         }
         return prev.map((d) =>
           d.id === "install"
-            ? { ...d, status: safeStatus, name: instanceId ?? d.name, instanceId: instanceId ?? d.instanceId }
+            ? { ...d, status: safeStatus, name: title ?? instanceId ?? d.name, instanceId: instanceId ?? d.instanceId }
             : d
         );
       });
@@ -114,13 +110,16 @@ function DownloadsPopup() {
     });
 
     const unlistenAssetStatus = listen<string>("asset-status", (event) => {
+      console.log("asset-status raw:", event.payload); // 👈
       const raw = event.payload;
       let status = "";
       let instanceId: string | undefined;
+      let title: string | undefined;
       try {
         const parsed = JSON.parse(raw);
         status = parsed.status ?? raw;
         instanceId = parsed.instanceId;
+        title = parsed.title;
       } catch {
         status = raw;
       }
@@ -132,7 +131,8 @@ function DownloadsPopup() {
             ...prev,
             {
               id: "assets",
-              name: instanceId ?? "Assets",
+              name: title ?? instanceId ?? "Assets",
+              title, 
               instanceId,
               progress: 0,
               status: safeStatus,
@@ -141,7 +141,7 @@ function DownloadsPopup() {
         }
         return prev.map((d) =>
           d.id === "assets"
-            ? { ...d, status: safeStatus, instanceId, name: instanceId ?? d.name }
+            ? { ...d, status: safeStatus, instanceId, title: title ?? d.title, name: title ?? instanceId ?? d.name }
             : d
         );
       });
@@ -215,7 +215,6 @@ function DownloadsPopup() {
 
     return () => {
       unlistenProgress.then((f) => f());
-      unlistenAssetInstance.then((f) => f());
       unlistenStatus.then((f) => f());
       unlistenDone.then((f) => f());
       unlistenAsset.then((f) => f());
@@ -285,7 +284,7 @@ function DownloadsPopup() {
             {downloads.map((item) => (
               <div key={item.id} className="flex flex-col gap-1">
                 <span className="text-sm font-semibold text-foreground">
-                  {item.name}
+                  {item.title ?? item.name}
                 </span>
 
                 <ProgressBar value={item.progress}>

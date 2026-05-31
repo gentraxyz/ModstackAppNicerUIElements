@@ -1,7 +1,7 @@
 {
   "name": "modstack",
   "private": true,
-  "version": "1.0.4-beta",
+  "version": "1.0.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,6 +16,7 @@
     "@heroui/react": "^3.0.1",
     "@heroui/styles": "^3.0.1",
     "@tabler/icons-react": "^3.41.1",
+    "@tabler/icons-webfont": "^3.44.0",
     "@tauri-apps/api": "^2.3.0",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-fs": "^2.5.1",

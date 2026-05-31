@@ -4,13 +4,14 @@ use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use reqwest::Client;
 use minecraft_msa_auth::MinecraftAuthorizationFlow;
+use urlencoding::decode;
 
 const CLIENT_ID: &str = "28345b95-0610-4565-b77d-03a20a541560";
 const REDIRECT_URI: &str = "http://localhost:7878/callback";
 
 #[command]
 pub async fn login_microsoft() -> Result<Value, String> {
-    let listener = TcpListener::bind("127.0.0.1:7878")
+    let listener = TcpListener::bind("0.0.0.0:7878")
         .await
         .map_err(|e| e.to_string())?;
 
@@ -22,7 +23,7 @@ pub async fn login_microsoft() -> Result<Value, String> {
         &scope=XboxLive.signin%20offline_access\
         &prompt=select_account",
         CLIENT_ID,
-        REDIRECT_URI
+        urlencoding::encode(REDIRECT_URI)
     );
 
     open::that(url).map_err(|e| e.to_string())?;
@@ -34,77 +35,57 @@ pub async fn login_microsoft() -> Result<Value, String> {
         let n = stream.read(&mut buf).await.map_err(|e| e.to_string())?;
         let request = String::from_utf8_lossy(&buf[..n]);
 
-        if let Some(line) = request.lines().next() {
-            if line.contains("/callback") {
-                if let Some(code_part) = line.split("code=").nth(1) {
-                    let code = code_part
-                        .split('&')
-                        .next()
-                        .unwrap_or("")
-                        .split(' ')
-                        .next()
-                        .unwrap_or("")
-                        .to_string();
+        let first_line = request.lines().next().unwrap_or("");
 
-                    let body = r#"<!DOCTYPE html>
-                    <html lang="es">
-                    <head>
-                    <meta charset="UTF-8" />
-                    <title>Modstack Auth Success</title>
-                    <style>
-                      body {
-                        margin: 0;
-                        background: #121212;
-                        color: white;
-                        font-family: Helvetica, Arial, sans-serif;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        height: 100vh;
-                      }
-                      .card { text-align: center; }
-                      .check {
-                        width: 72px; height: 72px; border-radius: 50%;
-                        background: #1ed760;
-                        display: flex; align-items: center; justify-content: center;
-                        margin: 0 auto 20px; font-size: 30px; color: black;
-                      }
-                      h1 { font-size: 24px; margin: 0; }
-                      p { color: #aaa; margin-top: 10px; }
-                    </style>
-                    </head>
-                    <body>
-                      <div class="card">
-                        <div class="check">&#10004;</div>
-                        <h1>Authentication complete</h1>
-                        <p>You can close this window</p>
-                      </div>
-                      <script>setTimeout(() => window.close(), 1500);</script>
-                    </body>
-                    </html>"#;
+        if !first_line.contains("/callback") {
+            continue;
+        }
 
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
+        if first_line.contains("error=") {
+            return Err("Microsoft devolvió un error en el callback OAuth".to_string());
+        }
 
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    break code;
-                }
+        if let Some(code_part) = first_line.split("code=").nth(1) {
+            let raw_code = code_part
+                .split('&')
+                .next()
+                .unwrap_or("")
+                .split(' ')
+                .next()
+                .unwrap_or("");
+
+            let code = decode(raw_code)
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|_| raw_code.to_string());
+
+            let body = include_str!("../commands/auth_success.html");
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+
+            if !code.is_empty() {
+                break code;
+            } else {
+                return Err("Código OAuth vacío recibido".to_string());
             }
         }
     };
 
-    let (ms_access_token, ms_refresh_token) = exchange_code(&code).await?;
+    let (ms_access_token, ms_refresh_token) = exchange_code(&code).await
+        .map_err(|e| format!("Error al intercambiar código: {}", e))?;
 
     let mc_flow = MinecraftAuthorizationFlow::new(reqwest::Client::new());
     let mc_token = mc_flow
         .exchange_microsoft_token(&ms_access_token)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Error al obtener token de Minecraft: {}", e))?;
 
-    let profile = get_minecraft_profile(mc_token.access_token().as_ref()).await?;
+    let profile = get_minecraft_profile(mc_token.access_token().as_ref()).await
+        .map_err(|e| format!("Error al obtener perfil: {}", e))?;
 
     Ok(json!({
         "type": "microsoft",
@@ -183,13 +164,21 @@ async fn exchange_code(code: &str) -> Result<(String, String), String> {
 
     let json: Value = res.json().await.map_err(|e| e.to_string())?;
 
+    if let Some(err) = json.get("error") {
+        return Err(format!(
+            "MS token error: {} — {}",
+            err,
+            json.get("error_description").unwrap_or(&Value::Null)
+        ));
+    }
+
     let access_token = json["access_token"]
         .as_str()
-        .ok_or("No access_token")?
+        .ok_or("No access_token en respuesta")?
         .to_string();
     let refresh_token = json["refresh_token"]
         .as_str()
-        .ok_or("No refresh_token")?
+        .ok_or("No refresh_token en respuesta")?
         .to_string();
 
     Ok((access_token, refresh_token))

@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
- 
+
 mod commands;
 mod core;
 mod utils;
@@ -27,6 +27,12 @@ use tauri::Manager;
 struct PendingMrstack(std::sync::Mutex<Option<String>>);
  
 fn main() {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        std::env::set_var("WEBKIT_FORCE_SANDBOX", "0");
+    }
+
     std::thread::spawn(|| {
         let _ = std::panic::catch_unwind(|| {
             discord::init();
@@ -128,6 +134,12 @@ fn main() {
             get_instance_worlds,
             anyserver_get,
             kill_minecraft,
+            get_instance_files,
+            read_instance_file,
+            write_instance_file,    
+            delete_instance_file,
+            rename_instance_file,
+            get_instance_playtime,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri");

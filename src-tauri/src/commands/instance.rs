@@ -1300,7 +1300,7 @@ pub async fn launch_instance_cmd(
 
     if !jar.exists() || !json.exists() {
         ilog!(&app, &log_id, "Downloading Minecraft {}", version);
-        app.emit("install-status", format!("Downloading Minecraft {}...", version)).ok();
+        app.emit("install-status", serde_json::json!({"status": format!("Downloading Minecraft {}...", version), "instanceId": &instance.id, "title": &instance.name}).to_string()).ok();
         let manifest_url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
         let manifest: Value = reqwest::get(manifest_url)
             .await
@@ -1326,7 +1326,7 @@ pub async fn launch_instance_cmd(
         download(&parsed.downloads.client.url, &jar).await?;
         ilog!(&app, &log_id, "Minecraft {} downloaded", version);
         ilog!(&app, &log_id, "Downloading libraries and natives...");
-        app.emit("install-status", "Downloading libraries...").ok();
+        app.emit("install-status", serde_json::json!({"status": "Downloading libraries...", "instanceId": &instance.id, "title": &instance.name}).to_string()).ok();
         download_libraries(&parsed.libraries, &cache_libs, &natives_dir, &app, &log_id).await?;
         ilog!(&app, &log_id, "Libraries and natives ready");
         app.emit("install-done", &instance_id).ok();
@@ -1464,13 +1464,18 @@ pub async fn launch_instance_cmd(
     let count = AtomicUsize::new(0);
     let client = reqwest::Client::new();
 
+    app.emit("asset-status", serde_json::json!({
+        "status": "Downloading assets",
+        "instanceId": &instance.id,
+        "title": &instance.name
+    }).to_string()).ok();
+
     stream::iter(objects)
         .for_each_concurrent(256, |(_, obj)| {
             let client = client.clone();
             let objects_dir = objects_dir.clone();
             let app = app.clone();
             let count = &count;
-            let instance_name = instance.name.clone();
             async move {
                 let hash = obj["hash"].as_str().unwrap();
                 let subdir = &hash[0..2];
@@ -1491,7 +1496,6 @@ pub async fn launch_instance_cmd(
                 }
                 let c = count.fetch_add(1, Ordering::Relaxed) + 1;
                 app.emit("asset-progress", format!("{}/{}", c, total)).ok();
-                app.emit("asset-instance", &instance_name).ok();
             }
         })
         .await;
@@ -1957,8 +1961,21 @@ pub async fn launch_instance_cmd(
         });
     }
     
+    {
+        let mut start = state.playtime_start.lock().unwrap();
+        *start = Some((instance_id.clone(), std::time::Instant::now()));
+    }
+
     child.wait().map_err(|e| format!("Error waiting for Minecraft: {}", e))?;
-    
+
+    {
+        let mut start = state.playtime_start.lock().unwrap();
+        if let Some((id, instant)) = start.take() {
+            let elapsed = instant.elapsed().as_secs();
+            save_playtime(&app, &id, elapsed);
+        }
+    }
+
     app.emit("minecraft-closed", ()).ok();
     Ok(())
 }
@@ -3032,6 +3049,7 @@ pub async fn install_modrinth_modpack(
 pub fn register_local_instance_for_launch(
     app: AppHandle,
     id: String,
+    title: String,
     loader: String,
     version: String,
     state: State<'_, AppState>,
@@ -3040,7 +3058,7 @@ pub fn register_local_instance_for_launch(
     let mut manager = state.instances.lock().unwrap();
     manager.instances.retain(|i| i.id != id);
     manager.create_instance(
-        id.clone(),
+        title,  
         id.clone(),
         path,
         loader,
@@ -3112,4 +3130,119 @@ pub fn kill_minecraft(state: State<'_, AppState>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: Option<u64>,
+    pub children: Option<Vec<FileEntry>>,
+}
+
+#[command]
+pub fn get_instance_files(app: AppHandle, instance_id: String) -> Vec<FileEntry> {
+    let dir = instance_dir(&app, &instance_id);
+    read_dir_recursive(&dir, &dir, 0, 4)
+}
+
+fn read_dir_recursive(root: &PathBuf, path: &PathBuf, depth: u32, max_depth: u32) -> Vec<FileEntry> {
+    if depth >= max_depth { return vec![]; }
+    let Ok(entries) = fs::read_dir(path) else { return vec![]; };
+    let mut result: Vec<FileEntry> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            let is_dir = meta.is_dir();
+            let full_path = e.path();
+            let relative = full_path.strip_prefix(root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            Some(FileEntry {
+                name: e.file_name().to_string_lossy().to_string(),
+                path: relative,
+                is_dir,
+                size: if is_dir { None } else { Some(meta.len()) },
+                children: if is_dir {
+                    Some(read_dir_recursive(root, &full_path, depth + 1, max_depth))
+                } else {
+                    None
+                },
+            })
+        })
+        .collect();
+    result.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+    result
+}
+
+#[command]
+pub fn read_instance_file(app: AppHandle, instance_id: String, file_path: String) -> Result<String, String> {
+    let dir = instance_dir(&app, &instance_id);
+    let full_path = dir.join(&file_path);
+    if !full_path.starts_with(&dir) {
+        return Err("Access denied".into());
+    }
+    let content = fs::read_to_string(&full_path)
+        .map_err(|e| format!("Could not read file: {}", e))?;
+    Ok(content)
+}
+
+#[command]
+pub fn delete_instance_file(app: AppHandle, instance_id: String, file_path: String) -> Result<(), String> {
+    let dir = instance_dir(&app, &instance_id);
+    let full_path = dir.join(&file_path);
+    if !full_path.starts_with(&dir) {
+        return Err("Access denied".into());
+    }
+    if full_path.is_dir() {
+        fs::remove_dir_all(&full_path).map_err(|e| e.to_string())
+    } else {
+        fs::remove_file(&full_path).map_err(|e| e.to_string())
+    }
+}
+
+#[command]
+pub fn rename_instance_file(app: AppHandle, instance_id: String, file_path: String, new_name: String) -> Result<(), String> {
+    let dir = instance_dir(&app, &instance_id);
+    let full_path = dir.join(&file_path);
+    if !full_path.starts_with(&dir) {
+        return Err("Access denied".into());
+    }
+    let new_path = full_path.parent()
+        .ok_or("No parent dir")?
+        .join(&new_name);
+    fs::rename(&full_path, &new_path).map_err(|e| e.to_string())
+}
+
+#[command]
+pub fn write_instance_file(app: AppHandle, instance_id: String, file_path: String, content: String) -> Result<(), String> {
+    let dir = instance_dir(&app, &instance_id);
+    let full_path = dir.join(&file_path);
+    if !full_path.starts_with(&dir) {
+        return Err("Access denied".into());
+    }
+    fs::write(&full_path, content.as_bytes()).map_err(|e| format!("Could not write file: {}", e))
+}
+
+fn save_playtime(app: &AppHandle, instance_id: &str, seconds: u64) {
+    let path = instances_root(app)
+        .join(instance_id)
+        .join("playtime.json");
+    let existing: u64 = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    fs::write(&path, (existing + seconds).to_string()).ok();
+}
+
+#[command]
+pub fn get_instance_playtime(app: AppHandle, instance_id: String) -> u64 {
+    let path = instances_root(&app)
+        .join(&instance_id)
+        .join("playtime.json");
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }

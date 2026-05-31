@@ -203,7 +203,6 @@ export default function ServerBrowser() {
         .sb-close:hover { background: var(--color-surface, #1a1a1a); color: var(--color-foreground, #fff); }
       `}</style>
 
-      {/* Header */}
       <div className="flex items-center justify-between px-5 py-3 border-b" style={{ borderColor: "var(--color-border)" }}>
         <div className="flex items-center gap-2">
           <IconServer size={15} style={{ color: "var(--color-muted)" }} />
@@ -221,7 +220,6 @@ export default function ServerBrowser() {
         </div>
       </div>
 
-      {/* Filters */}
       <div className="flex items-center gap-2 px-5 py-2.5 border-b" style={{ borderColor: "var(--color-border)" }}>
         <div className="relative flex-1">
           <IconSearch size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
@@ -256,7 +254,6 @@ export default function ServerBrowser() {
         </button>
       </div>
 
-      {/* Content */}
       <div className="flex-1 overflow-y-auto min-h-0">
         {loading && (
           <div className="flex flex-col">
@@ -326,7 +323,6 @@ export default function ServerBrowser() {
         ))}
       </div>
 
-      {/* Modal */}
       {modalOpen && selectedServer && (
         <div className="sb-modal-overlay" onClick={() => setModalOpen(false)}>
           <div className="sb-modal" onClick={e => e.stopPropagation()}>

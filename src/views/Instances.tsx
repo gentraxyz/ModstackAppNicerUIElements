@@ -14,12 +14,13 @@ import {
 } from "@tabler/icons-react";
 import { listen } from "@tauri-apps/api/event";
 import { useInstance } from "../stores/instanceContext";
-import { useAuth } from "../stores/authContext";
 import {
   loadLocalInstances, updateLocalInstance, deleteLocalInstance,
   setSelectedId, getSelectedId, slugify,
   type LocalInstance,
 } from "../utils/localInstances";
+
+import "@tabler/icons-webfont/dist/tabler-icons.css";
 
 const CF_API_KEY = "$2a$10$piVONlDwyu/KXz.jZDFQ/eEdKEBmLYfEDK7vlLixtgevppSHQm06C";
 const CF_GAME_ID = 432;
@@ -1663,13 +1664,588 @@ function WorldsTab({ instance }: { instance: LocalInstance }) {
   );
 }
 
+interface FileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size?: number;
+  children?: FileEntry[];
+}
+
+function formatSize(bytes?: number): string {
+  if (bytes === undefined) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDate(ts?: number): string {
+  if (!ts) return "—";
+  return new Date(ts * 1000).toLocaleDateString("en-US", {
+    month: "2-digit", day: "2-digit", year: "2-digit",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function isTextFile(name: string): boolean {
+  const ext = name.split(".").pop()?.toLowerCase();
+  return ["txt", "json", "log", "cfg", "toml", "properties", "yaml", "yml", "xml", "md", "ini"].includes(ext ?? "");
+}
+
+function countItems(children?: FileEntry[]): string {
+  if (!children) return "—";
+  const n = children.length;
+  return `${n} ${n === 1 ? "item" : "items"}`;
+}
+
+function FileIconTabler({ name, isDir }: { name: string; isDir: boolean }) {
+  if (isDir) {
+    const ext = name.toLowerCase();
+    if (ext === "config" || ext === "configs" || ext === "defaultconfigs") return <i className="ti ti-settings" style={{ fontSize: 15, color: "#9ca3af" }} />;
+    if (ext === "mods") return <i className="ti ti-puzzle" style={{ fontSize: 15, color: "#a78bfa" }} />;
+    if (ext === "saves") return <i className="ti ti-world" style={{ fontSize: 15, color: "#34d399" }} />;
+    if (ext === "resourcepacks") return <i className="ti ti-photo" style={{ fontSize: 15, color: "#f472b6" }} />;
+    if (ext === "shaderpacks") return <i className="ti ti-sparkles" style={{ fontSize: 15, color: "#fbbf24" }} />;
+    if (ext === "datapacks") return <i className="ti ti-braces" style={{ fontSize: 15, color: "#60a5fa" }} />;
+    if (ext === "logs" || ext === "crash-reports") return <i className="ti ti-file-description" style={{ fontSize: 15, color: "#f87171" }} />;
+    return <i className="ti ti-folder" style={{ fontSize: 15, color: "#fbbf24" }} />;
+  }
+  const ext = name.split(".").pop()?.toLowerCase();
+  if (ext === "json") return <i className="ti ti-braces" style={{ fontSize: 15, color: "#60a5fa" }} />;
+  if (ext === "jar") return <i className="ti ti-package" style={{ fontSize: 15, color: "#a78bfa" }} />;
+  if (ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "webp") return <i className="ti ti-photo" style={{ fontSize: 15, color: "#f472b6" }} />;
+  if (ext === "zip" || ext === "mrpack" || ext === "mrstack") return <i className="ti ti-file-zip" style={{ fontSize: 15, color: "#fb923c" }} />;
+  if (ext === "dat" || ext === "nbt") return <i className="ti ti-database" style={{ fontSize: 15, color: "#94a3b8" }} />;
+  if (ext === "log") return <i className="ti ti-file-description" style={{ fontSize: 15, color: "#f87171" }} />;
+  if (ext === "toml" || ext === "cfg" || ext === "ini" || ext === "properties") return <i className="ti ti-file-settings" style={{ fontSize: 15, color: "#94a3b8" }} />;
+  if (ext === "txt" || ext === "md") return <i className="ti ti-file-text" style={{ fontSize: 15, color: "#d1d5db" }} />;
+  return <i className="ti ti-file" style={{ fontSize: 15, color: "#6b7280" }} />;
+}
+
+function FileActionsMenu({ entry, instanceId, onRename, onRefresh }: {
+  entry: FileEntry;
+  instanceId: string;
+  onDelete: () => void;
+  onRename: () => void;
+  onRefresh: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    window.addEventListener("mousedown", h);
+    return () => window.removeEventListener("mousedown", h);
+  }, [open]);
+
+  const handleCopyName = () => { navigator.clipboard.writeText(entry.name); setOpen(false); };
+  const handleCopyPath = () => { navigator.clipboard.writeText(entry.path); setOpen(false); };
+  const handleOpenFolder = async () => {
+    await invoke("open_local_instance_folder", { id: instanceId });
+    setOpen(false);
+  };
+  const handleRename = () => { onRename(); setOpen(false); };
+  const handleDelete = async () => {
+    try {
+      await invoke("delete_instance_file", { instanceId, filePath: entry.path });
+      onRefresh();
+    } catch (e) { toast.danger("Error deleting", { description: String(e) }); }
+    setOpen(false);
+  };
+
+  return (
+    <div ref={ref} className="relative" onClick={e => e.stopPropagation()}>
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="w-7 h-7 flex items-center justify-center rounded-[8px] text-muted hover:text-foreground hover:bg-white/5 transition-colors opacity-0 group-hover:opacity-100"
+      >
+        <IconDotsVertical size={14} />
+      </button>
+      {open && (
+        <div
+          className="absolute right-0 top-full mt-1 z-50 w-48 rounded-[12px] border border-border shadow-2xl overflow-hidden py-1"
+          style={{ backgroundColor: "var(--color-overlay)" }}
+        >
+          <button onClick={handleCopyName}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-foreground hover:bg-white/5 transition-colors">
+            <i className="ti ti-copy" style={{ fontSize: 14 }} /> Copy filename
+          </button>
+          <button onClick={handleCopyPath}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-foreground hover:bg-white/5 transition-colors">
+            <i className="ti ti-clipboard" style={{ fontSize: 14 }} /> Copy full path
+          </button>
+          <button onClick={handleOpenFolder}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-foreground hover:bg-white/5 transition-colors">
+            <i className="ti ti-folder-open" style={{ fontSize: 14 }} /> Open in folder
+          </button>
+          <div className="my-1 border-t border-border" />
+          <button onClick={handleRename}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-foreground hover:bg-white/5 transition-colors">
+            <i className="ti ti-pencil" style={{ fontSize: 14 }} /> Rename
+          </button>
+          <button
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-muted hover:bg-white/5 transition-colors cursor-not-allowed opacity-50">
+            <i className="ti ti-arrow-right" style={{ fontSize: 14 }} /> Move
+          </button>
+          <div className="my-1 border-t border-border" />
+          <button onClick={handleDelete}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-red-400 hover:bg-red-500/10 transition-colors">
+            <i className="ti ti-trash" style={{ fontSize: 14 }} /> Delete
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TextViewer({ instance, file, onBack, onSaved }: { 
+  instance: LocalInstance; 
+  file: FileEntry; 
+  onBack: () => void;
+  onSaved?: () => void;
+}) {
+  const [content, setContent] = useState<string | null>(null);
+  const [original, setOriginal] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    invoke<string>("read_instance_file", { instanceId: instance.id, filePath: file.path })
+      .then(c => {
+        let display = c;
+        if (file.name.endsWith(".json")) {
+          try { display = JSON.stringify(JSON.parse(c), null, 2); } catch {}
+        }
+        setContent(display);
+        setOriginal(display);
+      })
+      .catch(e => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, [file.path]);
+
+  const isDirty = content !== original;
+  const lines = (content ?? "").split("\n");
+
+  const handleSave = async () => {
+    if (!isDirty || content === null) return;
+    setSaving(true);
+    try {
+      await invoke("write_instance_file", { 
+        instanceId: instance.id, 
+        filePath: file.path, 
+        content 
+      });
+      setOriginal(content);
+      toast("File saved");
+      onSaved?.();
+    } catch (e) {
+      toast.danger("Error saving", { description: String(e) });
+    } finally { setSaving(false); }
+  };
+
+  // Sync line numbers scroll with textarea
+  const lineNumbersRef = useRef<HTMLDivElement>(null);
+  const handleScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
+    if (lineNumbersRef.current) {
+      lineNumbersRef.current.scrollTop = e.currentTarget.scrollTop;
+    }
+  };
+
+  // Tab key support
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const ta = e.currentTarget;
+      const start = ta.selectionStart;
+      const end = ta.selectionEnd;
+      const newVal = content!.substring(0, start) + "  " + content!.substring(end);
+      setContent(newVal);
+      requestAnimationFrame(() => {
+        ta.selectionStart = ta.selectionEnd = start + 2;
+      });
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+      e.preventDefault();
+      handleSave();
+    }
+  };
+
+  return (
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border flex-shrink-0">
+        <button onClick={onBack} className="flex items-center gap-1 text-xs text-muted hover:text-foreground transition-colors flex-shrink-0">
+          <IconChevronLeft size={14} /> Back
+        </button>
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <FileIconTabler name={file.name} isDir={false} />
+          <span className="text-sm font-medium text-foreground truncate">{file.name}</span>
+          {content !== null && (
+            <span className="text-xs text-muted">{lines.length} lines · {formatSize(file.size)}</span>
+          )}
+          {isDirty && (
+            <span className="w-2 h-2 rounded-full bg-[#22c55e] flex-shrink-0" title="Unsaved changes" />
+          )}
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {isDirty && (
+            <button
+              onClick={() => setContent(original)}
+              className="px-3 py-1.5 rounded-[8px] text-xs text-muted border border-border hover:bg-white/5 transition-colors"
+            >
+              Discard
+            </button>
+          )}
+          <button
+            onClick={handleSave}
+            disabled={!isDirty || saving}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] text-xs font-semibold bg-[#22c55e] hover:bg-[#16a34a] text-black transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <i className="ti ti-device-floppy" style={{ fontSize: 13 }} />
+            {saving ? "Saving..." : "Save"}
+          </button>
+        </div>
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-hidden" style={{ backgroundColor: "#000" }}>
+        {loading && (
+          <div className="flex items-center justify-center h-full">
+            <IconRefresh size={18} className="text-muted animate-spin" />
+          </div>
+        )}
+        {error && <div className="p-4 text-xs text-red-400">{error}</div>}
+        {!loading && !error && content !== null && (
+          <div className="flex h-full overflow-hidden font-mono text-xs" style={{ lineHeight: "1.6rem" }}>
+            <div
+              ref={lineNumbersRef}
+              className="select-none flex-shrink-0 overflow-hidden border-r border-white/10"
+              style={{
+                backgroundColor: "#0a0a0a",
+                color: "rgba(255,255,255,0.2)",
+                minWidth: 52,
+                textAlign: "right",
+                padding: "16px 12px",
+                lineHeight: "1.6rem",
+                overflowY: "hidden",
+              }}
+            >
+              {lines.map((_, i) => <div key={i}>{i + 1}</div>)}
+            </div>
+
+            <textarea
+              ref={textareaRef}
+              value={content}
+              onChange={e => setContent(e.target.value)}
+              onScroll={handleScroll}
+              onKeyDown={handleKeyDown}
+              spellCheck={false}
+              className="flex-1 resize-none focus:outline-none"
+              style={{
+                backgroundColor: "#000",
+                color: "#22c55e",
+                padding: "16px",
+                lineHeight: "1.6rem",
+                fontFamily: "monospace",
+                fontSize: 12,
+                border: "none",
+                overflowY: "auto",
+                whiteSpace: "pre",
+                overflowX: "auto",
+              }}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RenameModal({ entry, instanceId, onClose, onDone }: {
+  entry: FileEntry; instanceId: string; onClose: () => void; onDone: () => void;
+}) {
+  const [name, setName] = useState(entry.name);
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    if (!name.trim() || name === entry.name) { onClose(); return; }
+    setSaving(true);
+    try {
+      await invoke("rename_instance_file", { instanceId, filePath: entry.path, newName: name.trim() });
+      onDone();
+      onClose();
+    } catch (e) { toast.danger("Error renaming", { description: String(e) }); }
+    finally { setSaving(false); }
+  };
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="rounded-[15px] w-80 flex flex-col gap-4 shadow-2xl border border-white/10 p-5"
+        style={{ backgroundColor: "var(--color-overlay)" }}>
+        <p className="text-sm font-semibold text-foreground">Rename</p>
+        <input
+          autoFocus value={name} onChange={e => setName(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") handleSave(); if (e.key === "Escape") onClose(); }}
+          className="w-full px-3 py-2 rounded-[10px] border border-border bg-transparent text-sm text-foreground focus:outline-none focus:border-[#22c55e]/50 transition-colors"
+          style={{ backgroundColor: "var(--color-surface)" }}
+        />
+        <div className="flex gap-2 justify-end">
+          <button onClick={onClose} className="px-3 py-1.5 rounded-[8px] text-xs text-muted border border-border hover:bg-white/5 transition-colors">Cancel</button>
+          <button onClick={handleSave} disabled={saving || !name.trim()}
+            className="px-3 py-1.5 rounded-[8px] text-xs font-semibold bg-[#22c55e] hover:bg-[#16a34a] text-black transition-colors disabled:opacity-50">
+            {saving ? "Saving..." : "Rename"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function FilesTab({ instance }: { instance: LocalInstance }) {
+  const [tree, setTree] = useState<FileEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [currentPath, setCurrentPath] = useState<string[]>([]);
+  const [viewingFile, setViewingFile] = useState<FileEntry | null>(null);
+  const [sortBy, setSortBy] = useState<"name" | "size" | "modified">("name");
+  const [sortAsc, setSortAsc] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [renamingEntry, setRenamingEntry] = useState<FileEntry | null>(null);
+
+  const loadTree = () => {
+    setLoading(true);
+    setSelected(new Set());
+    invoke<FileEntry[]>("get_instance_files", { instanceId: instance.id })
+      .then(setTree)
+      .catch(e => console.error(e))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { loadTree(); }, [instance.id]);
+
+  const currentEntries: FileEntry[] = (() => {
+    let entries = tree;
+    for (const segment of currentPath) {
+      const found = entries.find(e => e.name === segment && e.is_dir);
+      entries = found?.children ?? [];
+    }
+    return entries;
+  })();
+
+  const handleSort = (col: "name" | "size" | "modified") => {
+    if (sortBy === col) setSortAsc(v => !v);
+    else { setSortBy(col); setSortAsc(true); }
+  };
+
+  const sorted = [...currentEntries]
+    .filter(e => !search || e.name.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => {
+      if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+      let cmp = 0;
+      if (sortBy === "name") cmp = a.name.localeCompare(b.name);
+      else if (sortBy === "size") cmp = (a.size ?? 0) - (b.size ?? 0);
+      return sortAsc ? cmp : -cmp;
+    });
+
+  const toggleSelect = (path: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  };
+  const toggleAll = () => {
+    if (selected.size === sorted.length) setSelected(new Set());
+    else setSelected(new Set(sorted.map(e => e.path)));
+  };
+  const allSelected = sorted.length > 0 && selected.size === sorted.length;
+  const someSelected = selected.size > 0 && !allSelected;
+
+  const SortHeader = ({ col, label, className = "" }: { col: "name" | "size" | "modified"; label: string; className?: string }) => (
+    <button onClick={() => handleSort(col)}
+      className={`flex items-center gap-1 text-[11px] font-semibold text-muted hover:text-foreground tracking-wide uppercase transition-colors ${className}`}>
+      {label}
+      {sortBy === col && <IconChevronDown size={10} className={`transition-transform ${sortAsc ? "" : "rotate-180"}`} />}
+    </button>
+  );
+
+  if (viewingFile) return <TextViewer instance={instance} file={viewingFile} onBack={() => setViewingFile(null)} />;
+
+  if (loading) return (
+    <div className="flex items-center justify-center flex-1 h-full">
+      <IconRefresh size={20} className="text-muted animate-spin" />
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex items-center gap-2 px-4 py-2 border-b border-border flex-shrink-0">
+        <button
+          onClick={() => { setCurrentPath([]); setSearch(""); setSelected(new Set()); }}
+          className={`w-8 h-8 flex items-center justify-center rounded-[10px] border transition-colors flex-shrink-0 ${
+            currentPath.length === 0
+              ? "border-white/10 text-foreground bg-white/5"
+              : "border-border text-muted hover:text-foreground hover:bg-white/5"
+          }`}
+        >
+          <i className="ti ti-home" style={{ fontSize: 15 }} />
+        </button>
+
+        <div className="flex items-center gap-1 flex-1 min-w-0 text-xs overflow-hidden">
+          <button
+            onClick={() => { setCurrentPath([]); setSearch(""); }}
+            className="text-muted hover:text-foreground transition-colors flex-shrink-0"
+          >
+            {instance.title}
+          </button>
+          {currentPath.map((seg, i) => (
+            <span key={i} className="flex items-center gap-1 flex-shrink-0">
+              <span className="text-muted opacity-30 mx-0.5">/</span>
+              <button
+                onClick={() => { setCurrentPath(currentPath.slice(0, i + 1)); setSearch(""); }}
+                className={`transition-colors truncate max-w-[120px] ${i === currentPath.length - 1 ? "text-foreground font-medium" : "text-muted hover:text-foreground"}`}
+              >
+                {seg}
+              </button>
+            </span>
+          ))}
+        </div>
+
+        <div className="relative w-48 flex-shrink-0">
+          <IconSearch size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search files..."
+            className="w-full pl-7 pr-3 py-1.5 rounded-[10px] border border-border bg-transparent text-xs text-foreground placeholder:text-muted focus:outline-none focus:border-[#22c55e]/50 transition-colors"
+            style={{ backgroundColor: "var(--color-surface)" }}
+          />
+        </div>
+
+        <button onClick={loadTree}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[8px] border border-border text-xs text-muted hover:text-foreground hover:bg-white/5 transition-colors flex-shrink-0">
+          <IconRefresh size={12} /> Refresh
+        </button>
+
+        <button
+          onClick={() => invoke("open_local_instance_folder", { id: instance.id })}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] text-xs font-semibold bg-white/5 border border-border text-foreground hover:bg-white/10 transition-colors flex-shrink-0"
+        >
+          <i className="ti ti-folder-open" style={{ fontSize: 13 }} /> Open folder
+        </button>
+      </div>
+
+      <div className="flex items-center px-4 py-2 border-b border-border flex-shrink-0 gap-3">
+        <div className="w-5 flex-shrink-0 flex items-center justify-center">
+          <button
+            onClick={toggleAll}
+            className={`w-4 h-4 rounded-[4px] border flex items-center justify-center transition-all ${
+              allSelected ? "bg-[#22c55e] border-[#22c55e]" :
+              someSelected ? "bg-[#22c55e]/30 border-[#22c55e]/50" :
+              "border-border hover:border-[#22c55e]/40"
+            }`}
+          >
+            {allSelected && <IconCheck size={10} className="text-black" strokeWidth={3} />}
+            {someSelected && <div className="w-2 h-0.5 bg-[#22c55e] rounded-full" />}
+          </button>
+        </div>
+        <SortHeader col="name" label="Name" className="flex-1" />
+        <SortHeader col="size" label="Size" className="w-28" />
+        <div className="w-36 text-[11px] font-semibold text-muted tracking-wide uppercase">Created</div>
+        <SortHeader col="modified" label="Modified" className="w-36" />
+        <div className="w-16 text-[11px] font-semibold text-muted tracking-wide uppercase text-right">Actions</div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {sorted.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full gap-3 opacity-40">
+            <i className="ti ti-folder-off text-muted" style={{ fontSize: 36 }} />
+            <p className="text-sm text-muted">Empty folder</p>
+          </div>
+        ) : (
+          sorted.map(entry => {
+            const isSelected = selected.has(entry.path);
+            return (
+              <div
+                key={entry.path}
+                className={`flex items-center gap-3 px-4 py-3 border-b border-border transition-colors group cursor-pointer ${
+                  isSelected ? "bg-[#22c55e]/5" : "hover:bg-white/[0.025]"
+                }`}
+                onClick={() => {
+                  if (entry.is_dir) {
+                    setCurrentPath([...currentPath, entry.name]);
+                    setSearch("");
+                    setSelected(new Set());
+                  } else if (isTextFile(entry.name)) {
+                    setViewingFile(entry);
+                  }
+                }}
+              >
+                <div className="w-5 flex-shrink-0 flex items-center justify-center" onClick={e => { e.stopPropagation(); toggleSelect(entry.path); }}>
+                  <div className={`w-4 h-4 rounded-[4px] border flex items-center justify-center transition-all cursor-pointer ${
+                    isSelected ? "bg-[#22c55e] border-[#22c55e]" : "border-border hover:border-[#22c55e]/50"
+                  }`}>
+                    {isSelected && <IconCheck size={10} className="text-black" strokeWidth={3} />}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                  <FileIconTabler name={entry.name} isDir={entry.is_dir} />
+                  <span className={`text-sm truncate ${entry.is_dir ? "text-foreground font-medium" : "text-muted group-hover:text-foreground transition-colors"}`}>
+                    {entry.name}
+                  </span>
+                </div>
+
+                <div className="w-28 flex-shrink-0">
+                  <span className="text-xs text-muted">
+                    {entry.is_dir ? countItems(entry.children) : formatSize(entry.size)}
+                  </span>
+                </div>
+
+                <div className="w-36 flex-shrink-0">
+                  <span className="text-xs text-muted">—</span>
+                </div>
+
+                <div className="w-36 flex-shrink-0">
+                  <span className="text-xs text-muted">{formatDate((entry as any).modified)}</span>
+                </div>
+
+                <div className="w-16 flex-shrink-0 flex justify-end">
+                  <FileActionsMenu
+                    entry={entry}
+                    instanceId={instance.id}
+                    onDelete={loadTree}
+                    onRename={() => setRenamingEntry(entry)}
+                    onRefresh={loadTree}
+                  />
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {renamingEntry && (
+        <RenameModal
+          entry={renamingEntry}
+          instanceId={instance.id}
+          onClose={() => setRenamingEntry(null)}
+          onDone={loadTree}
+        />
+      )}
+    </div>
+  );
+}
+
 function InstanceContentView({
   instance, onBackToMenu, onSwitchToDownload, onEdit, onExport, onOpenFolder,
 }: {
   instance: LocalInstance; onBackToMenu: () => void; onSwitchToDownload: () => void;
   onEdit: () => void; onExport: () => void; onOpenFolder: () => void;
 }) {
-  const { user } = useAuth();
   const { launchInstance, launchedInstanceId, installProgress, installStatus } = useInstance();
   const isThisLaunched = launchedInstanceId === instance.id;
 
@@ -1685,11 +2261,15 @@ function InstanceContentView({
   const iconUrl = toUrl(instance.icon_path);
   const instanceIdentifier = `${instance.id}-`;
 
+  const [playtime, setPlaytime] = useState(0);
+
+  useEffect(() => {
+      invoke<number>("get_instance_playtime", { instanceId: instance.id })
+          .then(setPlaytime);
+  }, [instance.id]);
+
   const handlePlay = () => {
-    if (!user) {
-      return toast.danger("Sign in required", { description: "You must be signed in to play." });
-    }
-    launchInstance(instance as any);
+    launchInstance({ ...instance, _isLocal: true } as any);
   };
 
   useEffect(() => {
@@ -1765,7 +2345,20 @@ function InstanceContentView({
           </div>
           <div>
             <h1 className="text-lg font-bold text-foreground leading-tight">{instance.title}</h1>
-            <p className="text-sm text-muted mt-0.5">{loaderLabel} {instance.minecraft_version}</p>
+            <div className="flex items-center gap-3 mt-0.5">
+              <p className="text-sm text-muted">{loaderLabel} {instance.minecraft_version}</p>
+              <span className="text-muted text-xs">•</span>
+              <span className="flex items-center gap-1 text-xs text-muted">
+                <i className="ti ti-clock" style={{ fontSize: 11 }} />
+                {playtime === 0 ? "Never played" : (() => {
+                  const h = Math.floor(playtime / 3600);
+                  const m = Math.floor((playtime % 3600) / 60);
+                  if (h > 0) return `${h}h ${m}m played`;
+                  if (m > 0) return `${m}m played`;
+                  return `${playtime}s played`;
+                })()}
+              </span>
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -1815,7 +2408,7 @@ function InstanceContentView({
         ))}
       </div>
 
-      {activeTab !== "Logs" && activeTab !== "Worlds" && (
+      {activeTab !== "Logs" && activeTab !== "Worlds" && activeTab !== "Files" && (
         <>
           <div className="flex items-center gap-2 px-5 py-2.5 border-b border-border flex-wrap">
             <div className="relative" style={{ minWidth: 180, flex: "1 1 180px", maxWidth: 500 }}>
@@ -1856,11 +2449,15 @@ function InstanceContentView({
         </>
       )}
 
+      {activeTab === "Files" && (
+        <FilesTab instance={instance} />
+      )}
+      
       {activeTab === "Worlds" && (
         <WorldsTab instance={instance} />
       )}
-      
-      {activeTab !== "Logs" && activeTab !== "Worlds" && (
+    
+      {activeTab !== "Logs" && activeTab !== "Worlds" && activeTab !== "Files" && (
         <div className="flex-1 overflow-y-auto">
           {loadingMods ? (
             <div className="flex items-center justify-center h-full opacity-30"><IconRefresh size={24} className="text-muted animate-spin" /></div>
@@ -2133,8 +2730,7 @@ function InstanceDownloadView({ instance, onBack }: { instance: LocalInstance; o
         </div>
         <SimpleDropdown label="Sort by" value={sortBy} options={SORT_OPTIONS} onChange={v => { setSortBy(v); setPage(0); }} />
         <SimpleDropdown label="View" value={String(viewCount)} options={VIEW_OPTIONS} onChange={v => { setViewCount(Number(v)); setPage(0); }} />
-        <div className="flex items-center gap-1 ml-auto">
-          <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={loading || page === 0}
+                  <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={loading || page === 0}
             className="w-7 h-7 flex items-center justify-center rounded-[8px] border border-border text-muted hover:text-foreground disabled:opacity-30 transition-colors">
             <IconChevronLeft size={13} />
           </button>
@@ -2153,6 +2749,7 @@ function InstanceDownloadView({ instance, onBack }: { instance: LocalInstance; o
             className="w-7 h-7 flex items-center justify-center rounded-[8px] border border-border text-muted hover:text-foreground disabled:opacity-30 transition-colors">
             <IconChevronRight size={13} />
           </button>
+        <div className="flex items-center gap-1 ml-auto">
         </div>
       </div>
 
