@@ -350,6 +350,50 @@ function VersionDropdown({ value, onChange, versions, loading }: {
   );
 }
 
+const RECOMMENDED_MODPACKS = [
+  { slug: "none", name: "None (Vanilla/Empty)" },
+  { slug: "fabulously-optimized", name: "Fabulously Optimized" },
+  { slug: "adrenaline", name: "Adrenaline" },
+  { slug: "simply-optimized", name: "Simply Optimized" },
+  { slug: "cobblemon", name: "Cobblemon" },
+];
+
+function ModpackDropdown({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    window.addEventListener("mousedown", h);
+    return () => window.removeEventListener("mousedown", h);
+  }, [open]);
+  const current = RECOMMENDED_MODPACKS.find(m => m.slug === value) || RECOMMENDED_MODPACKS[0];
+  return (
+    <div ref={ref} className="relative">
+      <button type="button" onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center justify-between px-3 py-2 rounded-[15px] bg-field-background border border-border text-sm text-foreground hover:border-accent/40 transition-colors">
+        <span className={value ? "text-foreground" : "text-muted"}>{current.name}</span>
+        <IconChevronDown size={14} className="text-muted" />
+      </button>
+      {open && (
+        <div className="absolute bottom-full left-0 right-0 mb-1 z-50 bg-overlay border border-border rounded-[15px] overflow-hidden shadow-xl">
+          <div className="max-h-44 overflow-y-auto">
+            {RECOMMENDED_MODPACKS.map(m => (
+              <button key={m.slug} type="button"
+                onClick={() => { onChange(m.slug); setOpen(false); }}
+                className={["w-full flex items-center justify-between px-3 py-2 text-xs transition-colors",
+                  value === m.slug ? "bg-accent/10 text-accent" : "text-foreground hover:bg-surface-secondary"].join(" ")}>
+                {m.name}
+                {value === m.slug && <IconCheck size={12} />}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LoaderPill({ value, selected, onClick }: { value: Loader; selected: boolean; onClick: () => void }) {
   return (
     <button type="button" onClick={onClick}
@@ -1458,6 +1502,7 @@ function CreateModal({ onClose, onCreate }: { onClose: () => void; onCreate: (in
   const [name, setName] = useState("");
   const [loader, setLoader] = useState<Loader>("vanilla");
   const [version, setVersion] = useState("");
+  const [modpack, setModpack] = useState("none");
   const [iconSrc, setIconSrc] = useState<string | null>(null);
   const [bgSrc, setBgSrc] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -1466,6 +1511,23 @@ function CreateModal({ onClose, onCreate }: { onClose: () => void; onCreate: (in
     const title = name.trim();
     if (!title || saving) return;
     setSaving(true);
+
+    if (modpack !== "none") {
+      try {
+        const created = await invoke<LocalInstance>("install_modrinth_modpack", {
+          slug: modpack,
+          title: title,
+          iconUrl: iconSrc ?? null,
+          versionId: null,
+          instanceId: slugify(title) || `inst-${Date.now()}`,
+        });
+        onCreate(created);
+        onClose();
+      } catch (e) { toast.danger("Error installing modpack", { description: String(e) }); }
+      finally { setSaving(false); }
+      return;
+    }
+
     const inst: LocalInstance = {
       id: slugify(title) || `inst-${Date.now()}`,
       title, minecraft_version: version, loader,
@@ -1493,13 +1555,21 @@ function CreateModal({ onClose, onCreate }: { onClose: () => void; onCreate: (in
             <Input autoFocus placeholder="My survival instance..." onKeyDown={e => { if (e.key === "Enter" && name.trim()) handleCreate(); }} />
           </TextField>
           <div className="flex flex-col gap-2">
-            <span className="text-xs text-muted">Loader</span>
-            <div className="flex flex-wrap gap-1.5">{LOADERS.map(l => <LoaderPill key={l} value={l} selected={loader === l} onClick={() => setLoader(l)} />)}</div>
+            <span className="text-xs text-muted">Starter Modpack (Optional)</span>
+            <ModpackDropdown value={modpack} onChange={setModpack} />
           </div>
-          <div className="flex flex-col gap-2">
-            <span className="text-xs text-muted">Minecraft Version</span>
-            <VersionDropdown value={version} onChange={setVersion} versions={versions} loading={loadingVersions} />
-          </div>
+          {modpack === "none" && (
+            <>
+              <div className="flex flex-col gap-2">
+                <span className="text-xs text-muted">Loader</span>
+                <div className="flex flex-wrap gap-1.5">{LOADERS.map(l => <LoaderPill key={l} value={l} selected={loader === l} onClick={() => setLoader(l)} />)}</div>
+              </div>
+              <div className="flex flex-col gap-2">
+                <span className="text-xs text-muted">Minecraft Version</span>
+                <VersionDropdown value={version} onChange={setVersion} versions={versions} loading={loadingVersions} />
+              </div>
+            </>
+          )}
           <ImagePickRow label="Icon" previewSrc={iconSrc}
             onPick={async () => { const p = await pickImage(); if (p) setIconSrc(p); }}
             onClear={() => setIconSrc(null)} icon={<IconBox size={18} />} />

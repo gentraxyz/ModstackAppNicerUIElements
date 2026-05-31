@@ -2766,11 +2766,12 @@ pub async fn install_modrinth_modpack(
     title: String,
     icon_url: Option<String>,
     version_id: Option<String>,
+    instance_id: Option<String>,
 ) -> Result<LocalInstance, String> {
     use std::io::Read;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let id = format!("{}-{}", slug, version_id.as_deref().unwrap_or("latest"));
+    let id = instance_id.unwrap_or_else(|| format!("{}-{}", slug, version_id.as_deref().unwrap_or("latest")));
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
