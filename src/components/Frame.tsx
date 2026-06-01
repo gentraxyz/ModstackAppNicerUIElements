@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { listen } from "@tauri-apps/api/event";
 import { useNavigation } from "../hooks/useNavigation";
+import { useLaunch } from "../stores/launchContext";
 import { Button, ProgressBar } from "@heroui/react";
 import {
   IconChevronLeft,
@@ -20,211 +20,47 @@ interface DownloadItem {
   instanceId?: string;
   progress: number;
   status: string;
+  indeterminate?: boolean;
 }
 
 function DownloadsPopup() {
-  const [downloads, setDownloads] = useState<DownloadItem[]>([]);
+  const { progressMap, pendingInstances } = useLaunch();
   const [open, setOpen] = useState(false);
-  const [, setUserClosed] = useState(false);
+  const [userClosed, setUserClosed] = useState(false);
   const popupRef = useRef<HTMLDivElement>(null);
 
+  const downloads: DownloadItem[] = [
+    ...[...pendingInstances.entries()]
+      .filter(([id]) => ![...progressMap.keys()].some((k) => k.startsWith(`${id}:`)))
+      .map(([id, name]) => ({
+        id: `${id}:pending`,
+        name,
+        instanceId: id,
+        progress: 0,
+        status: `Launching ${name}...`,
+        indeterminate: true,
+      })),
+    ...[...progressMap.values()].map((p) => ({
+      id: `${p.instanceId}:${p.name.toLowerCase()}`,
+      name: p.name,
+      instanceId: p.instanceId,
+      progress: p.progress,
+      status: p.status,
+      indeterminate: p.indeterminate,
+    })),
+  ];
+
+  const hasActivity = downloads.length > 0 || pendingInstances.size > 0;
+
   useEffect(() => {
-    const unlistenProgress = listen<string>("install-progress", (event) => {
-      const [current, total] = event.payload.split("/").map(Number);
-      const progress = Math.floor((current / total) * 100);
-      setDownloads((prev) =>
-        prev.map((d) => (d.id === "install" ? { ...d, progress } : d))
-      );
-    });
-
-    const unlistenStatus = listen<string>("install-status", (event) => {
-      console.log("install-status raw:", event.payload);
-      const raw = event.payload;
-      let status = "";
-      let instanceId: string | undefined;
-      let title: string | undefined;
-      try {
-        const parsed = JSON.parse(raw);
-        status = parsed.status ?? raw;
-        instanceId = parsed.instanceId;
-        title = parsed.title;
-      } catch {
-        status = raw;
-      }
-      const safeStatus = status || "Downloading...";
-      setDownloads((prev) => {
-        const exists = prev.find((d) => d.id === "install");
-        if (!exists) {
-          return [
-            ...prev,
-            { id: "install", name: title ?? instanceId ?? "Modstack", instanceId, progress: 0, status: safeStatus },
-          ];
-        }
-        return prev.map((d) =>
-          d.id === "install"
-            ? { ...d, status: safeStatus, name: title ?? instanceId ?? d.name, instanceId: instanceId ?? d.instanceId }
-            : d
-        );
-      });
-      setUserClosed((closed) => {
-        if (!closed) setOpen(true);
-        return closed;
-      });
-    });
-
-    const unlistenDone = listen("install-done", () => {
-      setDownloads((prev) =>
-        prev.map((d) => (d.id === "install" ? { ...d, progress: 100 } : d))
-      );
-      setTimeout(() => {
-        setDownloads((prev) => prev.filter((d) => d.id !== "install"));
-        setUserClosed(false);
-      }, 1500);
-    });
-
-    const unlistenAsset = listen<string>("asset-progress", (event) => {
-      const [current, total] = event.payload.split("/").map(Number);
-      const progress = Math.floor((current / total) * 100);
-      setDownloads((prev) => {
-        const exists = prev.find((d) => d.id === "assets");
-        if (!exists) {
-          return [
-            ...prev,
-            { id: "assets", name: "Assets", progress, status: "Downloading assets" },
-          ];
-        }
-        return prev.map((d) =>
-          d.id === "assets" ? { ...d, progress } : d
-        );
-      });
-      setUserClosed((closed) => {
-        if (!closed) setOpen(true);
-        return closed;
-      });
-      if (current === total) {
-        setTimeout(() => {
-          setDownloads((prev) => prev.filter((d) => d.id !== "assets"));
-          setUserClosed(false);
-        }, 1500);
-      }
-    });
-
-    const unlistenAssetStatus = listen<string>("asset-status", (event) => {
-      console.log("asset-status raw:", event.payload); // 👈
-      const raw = event.payload;
-      let status = "";
-      let instanceId: string | undefined;
-      let title: string | undefined;
-      try {
-        const parsed = JSON.parse(raw);
-        status = parsed.status ?? raw;
-        instanceId = parsed.instanceId;
-        title = parsed.title;
-      } catch {
-        status = raw;
-      }
-      const safeStatus = status || "Downloading assets";
-      setDownloads((prev) => {
-        const exists = prev.find((d) => d.id === "assets");
-        if (!exists) {
-          return [
-            ...prev,
-            {
-              id: "assets",
-              name: title ?? instanceId ?? "Assets",
-              title, 
-              instanceId,
-              progress: 0,
-              status: safeStatus,
-            },
-          ];
-        }
-        return prev.map((d) =>
-          d.id === "assets"
-            ? { ...d, status: safeStatus, instanceId, title: title ?? d.title, name: title ?? instanceId ?? d.name }
-            : d
-        );
-      });
-      setUserClosed((closed) => {
-        if (!closed) setOpen(true);
-        return closed;
-      });
-    });
-
-    const unlistenJavaStart = listen<{ version: number }>(
-      "java-download-start",
-      (event) => {
-        const { version } = event.payload;
-        const id = `java-${version}`;
-        setDownloads((prev) => {
-          const exists = prev.find((d) => d.id === id);
-          if (!exists) {
-            return [
-              ...prev,
-              { id, name: `Java ${version}`, progress: 0, status: "Starting download..." },
-            ];
-          }
-          return prev;
-        });
-        setUserClosed((closed) => {
-          if (!closed) setOpen(true);
-          return closed;
-        });
-      }
-    );
-
-    const unlistenJavaProgress = listen<{
-      version: number;
-      percent: number;
-      status: string;
-    }>("java-download-progress", (event) => {
-      const { version, percent, status } = event.payload;
-      const id = `java-${version}`;
-      setDownloads((prev) =>
-        prev.map((d) => (d.id === id ? { ...d, progress: percent, status } : d))
-      );
-    });
-
-    const unlistenJavaLog = listen<{ version: number; message: string }>(
-      "java-log",
-      (event) => {
-        const { version, message } = event.payload;
-        const id = `java-${version}`;
-        setDownloads((prev) =>
-          prev.map((d) => (d.id === id ? { ...d, status: message } : d))
-        );
-      }
-    );
-
-    const unlistenJavaDone = listen<{ version: number }>(
-      "java-download-done",
-      (event) => {
-        const { version } = event.payload;
-        const id = `java-${version}`;
-        setDownloads((prev) =>
-          prev.map((d) =>
-            d.id === id ? { ...d, progress: 100, status: "Installed" } : d
-          )
-        );
-        setTimeout(() => {
-          setDownloads((prev) => prev.filter((d) => d.id !== id));
-          setUserClosed(false);
-        }, 1500);
-      }
-    );
-
-    return () => {
-      unlistenProgress.then((f) => f());
-      unlistenStatus.then((f) => f());
-      unlistenDone.then((f) => f());
-      unlistenAsset.then((f) => f());
-      unlistenAssetStatus.then((f) => f());
-      unlistenJavaStart.then((f) => f());
-      unlistenJavaProgress.then((f) => f());
-      unlistenJavaLog.then((f) => f());
-      unlistenJavaDone.then((f) => f());
-    };
-  }, []);
+    if (hasActivity && !userClosed) {
+      setOpen(true);
+    }
+    if (!hasActivity) {
+      setOpen(false);
+      setUserClosed(false);
+    }
+  }, [hasActivity, userClosed]);
 
   useEffect(() => {
     if (!open) return;
@@ -241,7 +77,7 @@ function DownloadsPopup() {
     return () => clearTimeout(timer);
   }, [open]);
 
-  if (downloads.length === 0) return null;
+  if (!hasActivity) return null;
 
   return (
     <div className="relative flex items-center" ref={popupRef}>
@@ -287,7 +123,7 @@ function DownloadsPopup() {
                   {item.title ?? item.name}
                 </span>
 
-                <ProgressBar value={item.progress}>
+                <ProgressBar value={item.progress} isIndeterminate={item.indeterminate}>
                   <ProgressBar.Track>
                     <ProgressBar.Fill />
                   </ProgressBar.Track>

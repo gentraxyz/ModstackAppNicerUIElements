@@ -12,6 +12,7 @@ import { toast } from "@heroui/react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getInstances, getInstance } from "../api/instances";
+import { useLaunch } from "./launchContext";
 
 const InstanceContext = createContext({
   instanceReady: false,
@@ -66,10 +67,18 @@ export function InstanceProvider({
   const [selectedInstance, setSelectedInstance] = useState<Instance>();
   const { user } = useAuth();
   const { maxRAM, windowWidth, windowHeight, fullscreen } = useSettings();
-  const [isRunning, setIsRunning] = useState(false);
   const [launchedInstanceId, setLaunchedInstanceId] = useState<string | null>(null);
-  const [installProgress, setInstallProgress] = useState(0);
-  const [installStatus, setInstallStatus] = useState("");
+  const { progressMap, runningInstances, addRunning, removeRunning, addPending, removePending } = useLaunch();
+
+  const isRunning = runningInstances.size > 0;
+
+  const installProgress = launchedInstanceId
+    ? (progressMap.get(`${launchedInstanceId}:instance`)?.progress ?? 0)
+    : 0;
+
+  const installStatus = launchedInstanceId
+    ? (progressMap.get(`${launchedInstanceId}:instance`)?.status ?? "")
+    : "";
 
   const init = async () => {
     const storedInstalledInstances = JSON.parse(
@@ -143,43 +152,13 @@ export function InstanceProvider({
   }, [instanceReady]);
 
   useEffect(() => {
-    let unlistenProgress: (() => void) | undefined;
-    let unlistenStatus: (() => void) | undefined;
-    let unlistenDone: (() => void) | undefined;
-    let unlistenClosed: (() => void) | undefined;
-
-    const setupListeners = async () => {
-      unlistenProgress = await listen<string>("install-progress", (event) => {
-        const [current, total] = event.payload.split("/").map(Number);
-        const percent = Math.floor((current / total) * 100);
-        setInstallProgress(percent);
-      });
-
-      unlistenStatus = await listen<string>("install-status", (event) => {
-        setInstallStatus(event.payload);
-      });
-
-      unlistenDone = await listen<string>("install-done", () => {
-        setInstallProgress(0);
-        setInstallStatus("");
-      });
-
-      unlistenClosed = await listen("minecraft-closed", () => {
-        setIsRunning(false);
-        setLaunchedInstanceId(null);
-        setInstallProgress(0);
-        setInstallStatus("");
-        invoke("discord_set_idle");
-      });
-    };
-
-    setupListeners();
+    const unlistenClosed = listen<string>("minecraft-closed", () => {
+      setLaunchedInstanceId(null);
+      invoke("discord_set_idle");
+    });
 
     return () => {
-      unlistenProgress?.();
-      unlistenStatus?.();
-      unlistenDone?.();
-      unlistenClosed?.();
+      unlistenClosed.then((f) => f());
     };
   }, []);
 
@@ -316,7 +295,8 @@ export function InstanceProvider({
       const isOffline = !hasValidToken;
       const token = isOffline ? "none" : accessToken!;
 
-      setIsRunning(true);
+      addRunning(instance.id);
+      addPending(instance.id, instance.title || instance.id);
 
       try {
         const loaderType: string =
@@ -373,9 +353,6 @@ export function InstanceProvider({
             return [...prev, instance];
           });
         
-          setInstallStatus("Downloading mods...");
-          setInstallProgress(0);
-        
           try {
             await invoke("install_instance_files", {
               instanceId: instance.id,
@@ -385,9 +362,6 @@ export function InstanceProvider({
             console.warn("[Install] Error downloading files, continuing anyway:", installErr);
           }
         }
-
-        setInstallProgress(0);
-        setInstallStatus("");
 
         setLaunchedInstanceId(instance.id);
 
@@ -430,21 +404,19 @@ export function InstanceProvider({
           armStyle: offlineSkinDataUrl ? offlineArmStyle : null,
         });
 
-        setIsRunning(false);
-        setLaunchedInstanceId(null);
-        
+        removePending(instance.id);
+
       } catch (err) {
-        setIsRunning(false);
+        removeRunning(instance.id);
+        removePending(instance.id);
         setLaunchedInstanceId(null);
-        setInstallProgress(0);
-        setInstallStatus("");
         console.error("Error launching instance:", err);
         toast.danger("Error launching instance", {
           description: String(err),
         });
       }
     },
-    [user, maxRAM, windowWidth, windowHeight, fullscreen],
+    [user, maxRAM, windowWidth, windowHeight, fullscreen, addRunning, removeRunning, addPending, removePending],
   );
 
   return (

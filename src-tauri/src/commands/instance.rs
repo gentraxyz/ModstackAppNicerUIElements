@@ -1,15 +1,13 @@
 #![allow(dead_code)]
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use tauri::Manager;
 
 use std::io::Write;
 
 use futures::stream::{self, StreamExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{fs, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf};
 use tauri::Emitter;
 use tauri::{command, AppHandle, State};
 use walkdir::WalkDir;
@@ -22,302 +20,18 @@ use crate::core::instance_manager::Instance;
 use crate::discord;
 use crate::ilog;
 use crate::ilog_err;
-use crate::java_runtime::ensure_java;
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize)]
-struct VersionJson {
-    downloads: Downloads,
-    libraries: Vec<Library>,
-    #[serde(rename = "assetIndex")]
-    asset_index: AssetIndex,
-    #[serde(rename = "javaVersion")]
-    java_version: Option<JavaVersion>,
-}
+use minecraft_java_rs_core::{
+    launcher::{
+        events::LaunchEvent,
+        options::{JavaOptions, LaunchOptions, LoaderConfig, MemoryConfig, ScreenConfig},
+        Launcher,
+    },
+    models::{loader::LoaderType, minecraft::Authenticator},
+};
+use tokio::sync::mpsc;
 
-#[derive(Debug, Deserialize)]
-struct JavaVersion {
-    #[serde(rename = "majorVersion")]
-    major_version: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct AssetIndex {
-    id: String,
-    url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Downloads {
-    client: DownloadFile,
-}
-
-#[derive(Debug, Deserialize)]
-struct DownloadFile {
-    url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Library {
-    name: Option<String>,
-    downloads: Option<LibDownloads>,
-    rules: Option<Vec<Rule>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Rule {
-    action: String,
-    os: Option<OsRule>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OsRule {
-    name: Option<String>,
-    arch: Option<String>,
-    version: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LibDownloads {
-    artifact: Option<Artifact>,
-    classifiers: Option<HashMap<String, Artifact>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Artifact {
-    url: String,
-    path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ForgeVersionJson {
-    #[serde(rename = "mainClass")]
-    main_class: String,
-    arguments: Option<ForgeArguments>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ForgeArguments {
-    game: Option<Vec<Value>>,
-    jvm: Option<Vec<Value>>,
-}
-
-fn current_os_name() -> &'static str {
-    if cfg!(windows) {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "osx"
-    } else {
-        "linux"
-    }
-}
-
-fn arch_matches(rule_arch: &str) -> bool {
-    let arch = rule_arch.to_ascii_lowercase();
-    if arch == "x86" {
-        cfg!(target_arch = "x86")
-    } else if arch == "x86_64" || arch == "amd64" {
-        cfg!(target_arch = "x86_64")
-    } else if arch == "arm64" || arch == "aarch64" || arch == "aarch_64" {
-        cfg!(target_arch = "aarch64")
-    } else {
-        true
-    }
-}
-
-fn os_rule_matches_parts(name: Option<&str>, arch: Option<&str>) -> bool {
-    if let Some(name) = name {
-        if name != current_os_name() {
-            return false;
-        }
-    }
-    if let Some(arch) = arch {
-        if !arch_matches(arch) {
-            return false;
-        }
-    }
-    true
-}
-
-fn os_rule_matches(os: &OsRule) -> bool {
-    let _ = &os.version;
-    os_rule_matches_parts(os.name.as_deref(), os.arch.as_deref())
-}
-
-fn is_library_allowed(rules: &[Rule]) -> bool {
-    let mut allowed = false;
-    for rule in rules {
-        let os_matches = match &rule.os {
-            None => true,
-            Some(os) => os_rule_matches(os),
-        };
-        if os_matches {
-            allowed = rule.action == "allow";
-        }
-    }
-    allowed
-}
-
-fn is_native_library_name(name: &str) -> bool {
-    name.split(':')
-        .nth(3)
-        .map(|classifier| classifier.to_ascii_lowercase().contains("natives-"))
-        .unwrap_or(false)
-}
-
-fn native_classifier_matches_current_arch(name: &str) -> bool {
-    let Some(classifier) = name.split(':').nth(3) else {
-        return true;
-    };
-    let classifier = classifier.to_ascii_lowercase();
-    if !classifier.contains("natives-") {
-        return true;
-    }
-    if classifier.contains("arm64")
-        || classifier.contains("aarch64")
-        || classifier.contains("aarch_64")
-    {
-        return cfg!(target_arch = "aarch64");
-    }
-    if classifier.ends_with("-x86") || classifier.contains("x86_32") {
-        return cfg!(target_arch = "x86");
-    }
-    true
-}
-
-fn should_use_manifest_library(lib: &Library) -> bool {
-    if let Some(rules) = &lib.rules {
-        if !is_library_allowed(rules) {
-            return false;
-        }
-    }
-    lib.name
-        .as_deref()
-        .map(native_classifier_matches_current_arch)
-        .unwrap_or(true)
-}
-
-fn is_value_library_allowed(lib: &Value) -> bool {
-    if let Some(rules) = lib.get("rules").and_then(|v| v.as_array()) {
-        let mut allowed = false;
-        for rule in rules {
-            let os_matches = match rule.get("os") {
-                None => true,
-                Some(os) => os_rule_matches_parts(
-                    os.get("name").and_then(|v| v.as_str()),
-                    os.get("arch").and_then(|v| v.as_str()),
-                ),
-            };
-            if os_matches {
-                allowed = rule.get("action").and_then(|v| v.as_str()) == Some("allow");
-            }
-        }
-        if !allowed {
-            return false;
-        }
-    }
-    lib.get("name")
-        .and_then(|v| v.as_str())
-        .map(native_classifier_matches_current_arch)
-        .unwrap_or(true)
-}
-
-fn classpath_separator() -> &'static str {
-    if cfg!(windows) {
-        ";"
-    } else {
-        ":"
-    }
-}
-
-fn artifact_path(root: &PathBuf, artifact: &str) -> PathBuf {
-    let mut path = root.clone();
-    for part in artifact.split('/') {
-        if !part.is_empty() {
-            path.push(part);
-        }
-    }
-    path
-}
-
-fn maven_artifact_path_from_name(name: &str) -> Option<String> {
-    let (coords, ext) = name.split_once('@').unwrap_or((name, "jar"));
-    let parts: Vec<&str> = coords.split(':').collect();
-    if parts.len() < 3 {
-        return None;
-    }
-    let group = parts[0].replace('.', "/");
-    let artifact = parts[1];
-    let version = parts[2];
-    let classifier = parts.get(3).copied().unwrap_or("");
-    let classifier_suffix = if classifier.is_empty() {
-        String::new()
-    } else {
-        format!("-{}", classifier)
-    };
-    Some(format!(
-        "{}/{}/{}/{}-{}{}.{}",
-        group, artifact, version, artifact, version, classifier_suffix, ext
-    ))
-}
-
-fn library_ga(name: &str) -> Option<String> {
-    let parts: Vec<&str> = name.splitn(3, ':').collect();
-    if parts.len() >= 2 {
-        Some(format!("{}:{}", parts[0], parts[1]))
-    } else {
-        None
-    }
-}
-
-fn manifest_library_artifact_path(lib: &Library) -> Option<String> {
-    lib.downloads
-        .as_ref()
-        .and_then(|d| d.artifact.as_ref())
-        .map(|a| a.path.clone())
-        .or_else(|| lib.name.as_deref().and_then(maven_artifact_path_from_name))
-}
-
-fn value_library_artifact_path(lib: &Value) -> Option<String> {
-    lib.get("downloads")
-        .and_then(|v| v.get("artifact"))
-        .and_then(|v| v.get("path"))
-        .and_then(|v| v.as_str())
-        .filter(|v| !v.is_empty())
-        .map(ToString::to_string)
-        .or_else(|| {
-            lib.get("name")
-                .and_then(|v| v.as_str())
-                .and_then(maven_artifact_path_from_name)
-        })
-}
-
-fn value_library_download_url(lib: &Value, artifact: &str) -> Option<String> {
-    lib.get("downloads")
-        .and_then(|v| v.get("artifact"))
-        .and_then(|v| v.get("url"))
-        .and_then(|v| v.as_str())
-        .filter(|v| !v.is_empty())
-        .map(ToString::to_string)
-        .or_else(|| {
-            lib.get("url")
-                .and_then(|v| v.as_str())
-                .filter(|v| !v.is_empty())
-                .map(|base| format!("{}/{}", base.trim_end_matches('/'), artifact))
-        })
-}
-
-fn push_classpath_path(paths: &mut Vec<String>, seen: &mut HashSet<String>, path: PathBuf) {
-    let path_str = path.to_string_lossy().to_string();
-    let key = if cfg!(windows) {
-        path_str.to_ascii_lowercase()
-    } else {
-        path_str.clone()
-    };
-    if seen.insert(key) {
-        paths.push(path_str);
-    }
-}
 
 #[command]
 pub async fn get_instances(launcher_id: String) -> Result<Vec<Value>, String> {
@@ -430,7 +144,7 @@ pub async fn install_instance_files(
             "Files already installed for '{}', skipping download",
             instance_id
         );
-        app.emit("install-done", &instance_id).ok();
+        app.emit("instance-done", &instance_id).ok();
         return Ok(());
     }
     if instance.files_installed == Some(true) && !mods_exist {
@@ -477,6 +191,7 @@ pub async fn install_instance_files(
             let instance_dir = instance_dir.clone();
             let app = app.clone();
             let log_id = log_id.clone();
+            let iid = instance_id.clone();
             let count = &count;
             async move {
                 let file_path = file["path"].as_str().unwrap_or("").to_string();
@@ -493,7 +208,7 @@ pub async fn install_instance_files(
                 }
                 if local_path.exists() {
                     let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-                    app.emit("install-progress", format!("{}/{}", c, total))
+                    app.emit("instance-progress", serde_json::json!({ "instanceId": &iid, "current": c, "total": total }))
                         .ok();
                     return;
                 }
@@ -513,7 +228,7 @@ pub async fn install_instance_files(
                     }
                 }
                 let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-                app.emit("install-progress", format!("{}/{}", c, total))
+                app.emit("instance-progress", serde_json::json!({ "instanceId": &iid, "current": c, "total": total }))
                     .ok();
             }
         })
@@ -538,11 +253,11 @@ pub async fn install_instance_files(
             }
         }
         let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-        app.emit("install-progress", format!("{}/{}", c, total))
+        app.emit("instance-progress", serde_json::json!({ "instanceId": &instance_id, "current": c, "total": total }))
             .ok();
         if local_path.exists() {
             ilog!(&app, &log_id, "Extracting overrides.zip...");
-            app.emit("install-status", "Extracting overrides...").ok();
+            app.emit("instance-status", serde_json::json!({ "instanceId": &instance_id, "status": "Extracting overrides..." })).ok();
             match fs::read(&local_path) {
                 Ok(zip_bytes) => {
                     let cursor = std::io::Cursor::new(zip_bytes);
@@ -584,26 +299,10 @@ pub async fn install_instance_files(
         total,
         total
     );
-    app.emit("install-done", instance_id).ok();
+    app.emit("instance-done", instance_id).ok();
     Ok(())
 }
 
-async fn download(url: &str, path: &PathBuf) -> Result<(), String> {
-    if path.exists() {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).ok();
-    }
-    let bytes = reqwest::get(url)
-        .await
-        .map_err(|e| e.to_string())?
-        .bytes()
-        .await
-        .map_err(|e| e.to_string())?;
-    fs::write(path, &bytes).map_err(|e| e.to_string())?;
-    Ok(())
-}
 
 fn offline_uuid(username: &str) -> String {
     let name = format!("OfflinePlayer:{}", username);
@@ -621,559 +320,6 @@ fn offline_uuid(username: &str) -> String {
     )
 }
 
-async fn extract_natives(native_jar: &PathBuf, natives_dir: &PathBuf) -> Result<(), String> {
-    let bytes = fs::read(native_jar).map_err(|e| e.to_string())?;
-    let cursor = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
-    for i in 0..archive.len() {
-        if let Ok(mut file) = archive.by_index(i) {
-            let name = file.name().to_string();
-            if name.starts_with("META-INF") {
-                continue;
-            }
-            if name.ends_with('/') {
-                continue;
-            }
-            let out = natives_dir.join(&name);
-            if let Some(parent) = out.parent() {
-                fs::create_dir_all(parent).ok();
-            }
-            if let Ok(mut out_file) = fs::File::create(&out) {
-                std::io::copy(&mut file, &mut out_file).ok();
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn download_libraries(
-    libraries: &[Library],
-    cache_libs: &PathBuf,
-    natives_dir: &PathBuf,
-    app: &AppHandle,
-    log_id: &str,
-) -> Result<(), String> {
-    let filtered: Vec<&Library> = libraries
-        .iter()
-        .filter(|lib| should_use_manifest_library(lib))
-        .collect();
-
-    let total = filtered.len();
-    let mut current = 0usize;
-
-    for lib in filtered {
-        current += 1;
-        app.emit("install-progress", format!("{}/{}", current, total)).ok();
-
-        if let Some(d) = &lib.downloads {
-            if let Some(a) = &d.artifact {
-                let lib_path = cache_libs.join(&a.path);
-                if let Err(e) = download(&a.url, &lib_path).await {
-                    ilog!(app, log_id, "Warn downloading lib {}: {}", a.path, e);
-                }
-                if lib_path.exists()
-                    && lib.name.as_deref().map(is_native_library_name).unwrap_or(false)
-                {
-                    if let Err(e) = extract_natives(&lib_path, natives_dir).await {
-                        ilog!(app, log_id, "Warn extracting native {}: {}", a.path, e);
-                    } else {
-                        ilog!(app, log_id, "Native extracted: {}", a.path);
-                    }
-                }
-            } else if let Some(name) = &lib.name {
-                if let Some(maven_path) = maven_artifact_path_from_name(name) {
-                    let lib_path = cache_libs.join(&maven_path);
-                    if !lib_path.exists() {
-                        let url = format!("https://libraries.minecraft.net/{}", maven_path);
-                        ilog!(app, log_id, "Fallback download lib {}: {}", name, url);
-                        if let Err(_) = download(&url, &lib_path).await {
-                            let url2 = format!("https://repo1.maven.org/maven2/{}", maven_path);
-                            if let Err(e) = download(&url2, &lib_path).await {
-                                ilog!(app, log_id, "Warn fallback lib {}: {}", name, e);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(classifiers) = &d.classifiers {
-                let native_key = if cfg!(windows) {
-                    "natives-windows"
-                } else if cfg!(target_os = "macos") {
-                    "natives-osx"
-                } else {
-                    "natives-linux"
-                };
-                if let Some(native) = classifiers.get(native_key) {
-                    let native_jar = cache_libs.join(&native.path);
-                    if let Err(e) = download(&native.url, &native_jar).await {
-                        ilog!(app, log_id, "Warn downloading native {}: {}", native.path, e);
-                        continue;
-                    }
-                    if let Err(e) = extract_natives(&native_jar, natives_dir).await {
-                        ilog!(app, log_id, "Warn extracting native {}: {}", native.path, e);
-                    } else {
-                        ilog!(app, log_id, "Native extracted: {}", native.path);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn install_forge(
-    mc_version: &str,
-    instance_id: &str,
-    engine: &PathBuf,
-    java: &PathBuf,
-    app: &AppHandle,
-    log_id: &str,
-) -> Result<(), String> {
-    let promos_url =
-        "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json";
-    let promos: Value = reqwest::get(promos_url)
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-    let forge_ver = promos["promos"]
-        .as_object()
-        .and_then(|p| {
-            p.get(&format!("{}-recommended", mc_version))
-                .or_else(|| p.get(&format!("{}-latest", mc_version)))
-        })
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("No Forge version found for {}", mc_version))?;
-    let full_version = format!("{}-{}", mc_version, forge_ver);
-    ilog!(app, log_id, "Installing Forge {}", full_version);
-
-    let forge_work_dir = engine.join(format!("forge_installer_{}", mc_version));
-    if forge_work_dir.exists() {
-        let _ = fs::remove_dir_all(&forge_work_dir);
-    }
-    fs::create_dir_all(&forge_work_dir)
-        .map_err(|e| format!("Could not create forge_installer dir: {}", e))?;
-
-    let installer_path = forge_work_dir.join(format!("forge-{}-installer.jar", full_version));
-    if !installer_path.exists() {
-        let url = format!(
-            "https://maven.minecraftforge.net/net/minecraftforge/forge/{}/forge-{}-installer.jar",
-            full_version, full_version
-        );
-        ilog!(app, log_id, "Downloading Forge installer...");
-        download(&url, &installer_path).await?;
-    }
-
-    let launcher_profiles = forge_work_dir.join("launcher_profiles.json");
-    if !launcher_profiles.exists() {
-        fs::write(
-            &launcher_profiles,
-            r#"{
-            "profiles": {},
-            "selectedProfile": null,
-            "clientToken": "modstack",
-            "authenticationDatabase": {}
-        }"#,
-        )
-        .map_err(|e| format!("Could not create launcher_profiles.json: {}", e))?;
-    }
-
-    let java_exe = if cfg!(windows) {
-        java.parent()
-            .ok_or("Could not get java bin dir")?
-            .join("javaw.exe")
-    } else {
-        java.clone()
-    };
-    let java_home = java_exe
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or("Could not determine JAVA_HOME")?;
-
-    let output = {
-        let mut c = Command::new(&java_exe);
-        c.current_dir(&forge_work_dir)
-            .arg(format!("-Djava.home={}", java_home.display()))
-            .arg("-Djava.net.preferIPv4Stack=true")
-            .arg("-Djava.awt.headless=true")
-            .arg("-jar")
-            .arg(&installer_path)
-            .arg("--installClient")
-            .arg(&forge_work_dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .env("_JAVA_OPTIONS", "-Djava.awt.headless=true");
-        #[cfg(windows)]
-        c.creation_flags(0x08000000);
-        c.output()
-            .map_err(|e| format!("Could not run Forge installer: {}", e))?
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    ilog!(
-        app,
-        log_id,
-        "--- Forge exit: {:?} ---",
-        output.status.code()
-    );
-    if !output.status.success() {
-        return Err(format!(
-            "Forge {} failed (exit {:?})\nstdout: {}\nstderr: {}",
-            full_version,
-            output.status.code(),
-            stdout,
-            stderr
-        ));
-    }
-
-    let forge_versions_src = forge_work_dir.join("versions");
-    if forge_versions_src.exists() {
-        copy_dir_all(&forge_versions_src, &engine.join("versions"))
-            .map_err(|e| format!("Error moving Forge versions: {}", e))?;
-    }
-
-    let forge_libs_src = forge_work_dir.join("libraries");
-    let engine_libs_dest = engine.join("libraries").join(instance_id).join(mc_version);
-
-    if engine_libs_dest.exists() {
-        let _ = fs::remove_dir_all(&engine_libs_dest);
-    }
-    fs::create_dir_all(&engine_libs_dest)
-        .map_err(|e| format!("Could not create Forge libs dir: {}", e))?;
-
-    if forge_libs_src.exists() {
-        copy_dir_all(&forge_libs_src, &engine_libs_dest)
-            .map_err(|e| format!("Error moving Forge libraries: {}", e))?;
-    }
-
-    let _ = fs::remove_dir_all(&forge_work_dir);
-    ilog!(app, log_id, "Forge {} installed successfully", full_version);
-    Ok(())
-}
-
-fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let dst_path = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dst_path)?;
-        } else {
-            if dst_path.exists() {
-                let _ = fs::remove_file(&dst_path);
-            }
-            fs::copy(entry.path(), dst_path)?;
-        }
-    }
-    Ok(())
-}
-
-async fn install_neoforge(
-    mc_version: &str,
-    instance_id: &str,
-    engine: &PathBuf,
-    java: &PathBuf,
-    app: &AppHandle,
-    log_id: &str,
-) -> Result<String, String> {
-    // Fetch available versions from maven metadata
-    let xml = reqwest::get(
-        "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
-    )
-    .await.map_err(|e| e.to_string())?
-    .text()
-    .await.map_err(|e| e.to_string())?;
-
-    let mc_parts: Vec<&str> = mc_version.splitn(3, '.').collect();
-
-    let neo_prefix = if mc_parts[0] == "1" && mc_parts.len() >= 3 {
-        format!("{}.{}.", mc_parts[1], mc_parts[2])
-    } else if mc_parts[0] == "1" && mc_parts.len() == 2 {
-        format!("{}.", mc_parts[1])
-    } else {
-        format!("{}.{}.", mc_parts[0], mc_parts[1])
-    };
-
-    ilog!(app, log_id, "NeoForge prefix: '{}'", neo_prefix);
-
-    let all_versions: Vec<String> = xml
-        .lines()
-        .filter_map(|line| {
-            line.trim()
-                .strip_prefix("<version>")
-                .and_then(|s| s.strip_suffix("</version>"))
-                .map(|s| s.to_string())
-        })
-        .filter(|v| v.starts_with(&neo_prefix))
-        .collect();
-
-    ilog!(app, log_id, "NeoForge versions found: {}", all_versions.len());
-
-    let neo_version = all_versions.iter()
-        .filter(|v| !v.contains("beta") && !v.contains("alpha"))
-        .last()
-        .or_else(|| all_versions.last())
-        .ok_or_else(|| format!("No NeoForge version for MC {} (prefix: {})", mc_version, neo_prefix))?
-        .clone();
-
-    ilog!(app, log_id, "Selected NeoForge version: {}", neo_version);
-
-    let neo_work_dir = engine.join(format!("neoforge_installer_{}", mc_version));
-    if neo_work_dir.exists() {
-        let _ = fs::remove_dir_all(&neo_work_dir);
-    }
-    fs::create_dir_all(&neo_work_dir)
-        .map_err(|e| format!("Could not create neoforge_installer dir: {}", e))?;
-
-    // Download installer
-    let installer_url = format!(
-        "https://maven.neoforged.net/releases/net/neoforged/neoforge/{}/neoforge-{}-installer.jar",
-        neo_version, neo_version
-    );
-    let installer_path = neo_work_dir.join(format!("neoforge-{}-installer.jar", neo_version));
-    ilog!(app, log_id, "Downloading NeoForge installer: {}", installer_url);
-    download(&installer_url, &installer_path).await?;
-
-    let launcher_profiles = neo_work_dir.join("launcher_profiles.json");
-    fs::write(
-        &launcher_profiles,
-        r#"{
-            "profiles": {},
-            "selectedProfile": null,
-            "clientToken": "modstack",
-            "authenticationDatabase": {}
-        }"#,
-    ).map_err(|e| format!("Could not create launcher_profiles.json: {}", e))?;
-
-    let java_exe = if cfg!(windows) {
-        java.parent()
-            .ok_or("Could not get java bin dir")?
-            .join("javaw.exe")
-    } else {
-        java.clone()
-    };
-    let java_home = java_exe
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or("Could not determine JAVA_HOME")?;
-
-    ilog!(app, log_id, "Running NeoForge installer...");
-    let output = {
-        let mut c = Command::new(&java_exe);
-        c.current_dir(&neo_work_dir)
-            .arg(format!("-Djava.home={}", java_home.display()))
-            .arg("-Djava.net.preferIPv4Stack=true")
-            .arg("-Djava.awt.headless=true")
-            .arg("-jar")
-            .arg(&installer_path)
-            .arg("--installClient")
-            .arg(&neo_work_dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .env("_JAVA_OPTIONS", "-Djava.awt.headless=true");
-        #[cfg(windows)]
-        c.creation_flags(0x08000000);
-        c.output()
-            .map_err(|e| format!("Could not run NeoForge installer: {}", e))?
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    ilog!(app, log_id, "NeoForge installer exit: {:?}", output.status.code());
-    ilog!(app, log_id, "stdout: {}", &stdout[..stdout.len().min(1000)]);
-    if !stderr.is_empty() {
-        ilog!(app, log_id, "stderr: {}", &stderr[..stderr.len().min(1000)]);
-    }
-
-    if !output.status.success() {
-        return Err(format!(
-            "NeoForge {} installer failed (exit {:?})\nstdout: {}\nstderr: {}",
-            neo_version, output.status.code(), stdout, stderr
-        ));
-    }
-
-    let neo_versions_src = neo_work_dir.join("versions");
-    if neo_versions_src.exists() {
-        copy_dir_all(&neo_versions_src, &engine.join("versions"))
-            .map_err(|e| format!("Error copying NeoForge versions: {}", e))?;
-        ilog!(app, log_id, "NeoForge versions copied");
-    } else {
-        ilog!(app, log_id, "Warn: no versions dir found after NeoForge install");
-    }
-
-    let neo_libs_src = neo_work_dir.join("libraries");
-    let engine_libs_dest = engine.join("libraries").join(instance_id).join(mc_version);
-    if engine_libs_dest.exists() {
-        let _ = fs::remove_dir_all(&engine_libs_dest);
-    }
-    fs::create_dir_all(&engine_libs_dest)
-        .map_err(|e| format!("Could not create NeoForge libs dest: {}", e))?;
-    if neo_libs_src.exists() {
-        copy_dir_all(&neo_libs_src, &engine_libs_dest)
-            .map_err(|e| format!("Error copying NeoForge libraries: {}", e))?;
-        ilog!(app, log_id, "NeoForge libraries copied");
-    } else {
-        ilog!(app, log_id, "Warn: no libraries dir found after NeoForge install");
-    }
-
-    let _ = fs::remove_dir_all(&neo_work_dir);
-    ilog!(app, log_id, "NeoForge {} installed successfully", neo_version);
-    Ok(neo_version)
-}
-
-async fn install_fabric(
-    version: &str,
-    engine_libs: &PathBuf,
-    app: &AppHandle,
-    log_id: &str,
-) -> Result<(String, Vec<PathBuf>), String> {
-    let loaders_url = format!("https://meta.fabricmc.net/v2/versions/loader/{}", version);
-    ilog!(
-        app,
-        log_id,
-        "Fetching Fabric loader versions for {}...",
-        version
-    );
-    let loaders_text = reqwest::get(&loaders_url)
-        .await
-        .map_err(|e| e.to_string())?
-        .text()
-        .await
-        .map_err(|e| e.to_string())?;
-    let loaders: Value = serde_json::from_str(&loaders_text)
-        .map_err(|e| format!("Error parsing Fabric loaders list: {}", e))?;
-    let loader_version = loaders
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|l| l["loader"]["version"].as_str())
-        .ok_or_else(|| format!("No Fabric loader version found for MC {}", version))?
-        .to_string();
-    let url = format!(
-        "https://meta.fabricmc.net/v2/versions/loader/{}/{}/profile/json",
-        version, loader_version
-    );
-    ilog!(app, log_id, "Downloading Fabric profile: {}", url);
-    let profile_text = reqwest::get(&url)
-        .await
-        .map_err(|e| e.to_string())?
-        .text()
-        .await
-        .map_err(|e| e.to_string())?;
-    let profile: Value = serde_json::from_str(&profile_text)
-        .map_err(|e| format!("Error parsing Fabric profile: {}", e))?;
-    let main_class = profile["mainClass"]
-        .as_str()
-        .map(|s| s.to_string())
-        .or_else(|| {
-            profile["mainClass"]["client"].as_str().map(|s| s.to_string())
-        })
-        .or_else(|| {
-            profile["launcherMeta"]["mainClass"]["client"].as_str().map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| "net.fabricmc.loader.impl.launch.knot.KnotClient".to_string());
-    
-    let empty_vec = vec![];
-    let libs_json: Vec<Value> = if profile["libraries"].is_array() {
-        profile["libraries"]
-            .as_array()
-            .unwrap_or(&empty_vec)
-            .clone()
-    } else {
-        let common_libs = profile["launcherMeta"]["libraries"]["common"]
-            .as_array()
-            .unwrap_or(&empty_vec);
-        let client_libs = profile["launcherMeta"]["libraries"]["client"]
-            .as_array()
-            .unwrap_or(&empty_vec);
-        let mut all = vec![];
-        all.extend_from_slice(common_libs);
-        all.extend_from_slice(client_libs);
-        all
-    };
-    ilog!(
-        app,
-        log_id,
-        "Fabric libraries to download: {}",
-        libs_json.len()
-    );
-    fs::create_dir_all(engine_libs)
-        .map_err(|e| format!("Could not create fabric libs dir: {}", e))?;
-    let client = reqwest::Client::new();
-    let mut downloaded_paths: Vec<PathBuf> = vec![];
-    for lib in &libs_json {
-        let name = match lib["name"].as_str() {
-            Some(n) => n,
-            None => continue,
-        };
-        let parts: Vec<&str> = name.splitn(3, ':').collect();
-        if parts.len() != 3 {
-            continue;
-        }
-        let (group, artifact, ver) = (parts[0], parts[1], parts[2]);
-        let group_path = group.replace('.', "/");
-        let jar_name = format!("{}-{}.jar", artifact, ver);
-        let maven_path = format!("{}/{}/{}/{}", group_path, artifact, ver, jar_name);
-        let local_path = engine_libs.join(&maven_path);
-        if local_path.exists() {
-            downloaded_paths.push(local_path);
-            continue;
-        }
-        if let Some(parent) = local_path.parent() {
-            fs::create_dir_all(parent).ok();
-        }
-        let base_url = lib["url"].as_str().unwrap_or("https://maven.fabricmc.net/");
-        let base_url = if base_url.ends_with('/') {
-            base_url.to_string()
-        } else {
-            format!("{}/", base_url)
-        };
-        let dl_url = format!("{}{}", base_url, maven_path);
-        match client.get(&dl_url).send().await {
-            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                Ok(bytes) => {
-                    fs::write(&local_path, &bytes).ok();
-                    downloaded_paths.push(local_path);
-                    ilog!(app, log_id, "Fabric lib downloaded: {}", jar_name);
-                }
-                Err(e) => ilog!(
-                    app,
-                    log_id,
-                    "Error reading bytes for Fabric lib {}: {}",
-                    jar_name,
-                    e
-                ),
-            },
-            Ok(resp) => ilog!(
-                app,
-                log_id,
-                "HTTP {} downloading Fabric lib: {}",
-                resp.status(),
-                jar_name
-            ),
-            Err(e) => ilog!(
-                app,
-                log_id,
-                "Error downloading Fabric lib {}: {}",
-                jar_name,
-                e
-            ),
-        }
-    }
-    ilog!(
-        app,
-        log_id,
-        "Fabric ready: {} libraries downloaded",
-        downloaded_paths.len()
-    );
-    Ok((main_class, downloaded_paths))
-}
 
 #[command]
 pub fn create_instance(
@@ -1217,6 +363,7 @@ pub fn get_instance_by_code(code: String, state: State<'_, AppState>) -> Result<
         .ok_or("Instance not found".into())
 }
 
+
 #[command]
 pub async fn launch_instance_cmd(
     app: AppHandle,
@@ -1234,12 +381,6 @@ pub async fn launch_instance_cmd(
 ) -> Result<(), String> {
     let instance = {
         let manager = state.instances.lock().unwrap();
-        for inst in &manager.instances {
-            println!(
-                "   id='{}' loader='{}' version='{}'",
-                inst.id, inst.loader, inst.minecraft_version
-            );
-        }
         manager
             .instances
             .iter()
@@ -1260,8 +401,6 @@ pub async fn launch_instance_cmd(
     };
 
     let log_id = format!("{}-{}", instance.id, instance.slug.as_deref().unwrap_or(""));
-    ilog!(&app, &log_id, "Looking up instance: '{}'", instance_id);
-
     let version = instance.minecraft_version.clone();
     let loader = instance.loader.to_lowercase();
 
@@ -1274,255 +413,20 @@ pub async fn launch_instance_cmd(
         loader
     );
 
-    let base = crate::commands::config::get_install_dir_path();
-    let engine = base.join("engine_data");
-
-    let instance_dir = instance.path.clone();
-    fs::create_dir_all(&instance_dir).ok();
-
-    let natives_dir = engine.join("natives").join(&version);
-    fs::create_dir_all(&natives_dir).ok();
-
-    let cache_dir = engine.join("cache").join(&instance_id).join(&version);
-    let cache_libs = cache_dir.join("libraries");
-    let cache_assets = cache_dir.join("assets");
-
-    fs::create_dir_all(&cache_libs).ok();
-    fs::create_dir_all(&cache_assets).ok();
-
-    let version_dir = engine.join("versions").join(&version);
-    let jar = version_dir.join(format!("{}.jar", version));
-    let json = version_dir.join(format!("{}.json", version));
-
-    fs::create_dir_all(&version_dir).ok();
-
-    let parsed: VersionJson;
-
-    if !jar.exists() || !json.exists() {
-        ilog!(&app, &log_id, "Downloading Minecraft {}", version);
-        app.emit("install-status", serde_json::json!({"status": format!("Downloading Minecraft {}...", version), "instanceId": &instance.id, "title": &instance.name}).to_string()).ok();
-        let manifest_url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
-        let manifest: Value = reqwest::get(manifest_url)
-            .await
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
-        let version_entry = manifest["versions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|v| v["id"] == version)
-            .ok_or_else(|| format!("Version '{}' not found in manifest", version))?;
-        let url = version_entry["url"].as_str().ok_or("Invalid URL")?;
-        let version_json: String = reqwest::get(url)
-            .await
-            .map_err(|e| e.to_string())?
-            .text()
-            .await
-            .map_err(|e| e.to_string())?;
-        fs::write(&json, &version_json).map_err(|e| e.to_string())?;
-        parsed = serde_json::from_str(&version_json).map_err(|e| e.to_string())?;
-        download(&parsed.downloads.client.url, &jar).await?;
-        ilog!(&app, &log_id, "Minecraft {} downloaded", version);
-        ilog!(&app, &log_id, "Downloading libraries and natives...");
-        app.emit("install-status", serde_json::json!({"status": "Downloading libraries...", "instanceId": &instance.id, "title": &instance.name}).to_string()).ok();
-        download_libraries(&parsed.libraries, &cache_libs, &natives_dir, &app, &log_id).await?;
-        ilog!(&app, &log_id, "Libraries and natives ready");
-        app.emit("install-done", &instance_id).ok();
-    } else {
-        ilog!(&app, &log_id, "Minecraft {} already downloaded", version);
-        let data = fs::read_to_string(&json).map_err(|e| e.to_string())?;
-        parsed = serde_json::from_str(&data).map_err(|e| e.to_string())?;
-        
-        let natives_empty = fs::read_dir(&natives_dir)
-            .map(|mut d| d.next().is_none())
-            .unwrap_or(true);
-        
-        let libs_empty = fs::read_dir(&cache_libs)
-            .map(|mut d| d.next().is_none())
-            .unwrap_or(true);
-        
-        if natives_empty || libs_empty {
-            ilog!(&app, &log_id, "Libraries/natives missing, re-downloading...");
-            download_libraries(&parsed.libraries, &cache_libs, &natives_dir, &app, &log_id).await?;
-            ilog!(&app, &log_id, "Libraries and natives ready");
-            app.emit("install-done", &instance_id).ok();
-        }
-    }
-
-    let required_java = parsed
-        .java_version
-        .as_ref()
-        .map(|j| j.major_version)
-        .unwrap_or(8);
-
-    ilog!(&app, &log_id, "Required Java: {}", required_java);
-
-    let runtime_base = base.join("runtime");
-    let runtime_path = ensure_java(&runtime_base, required_java, &app, &log_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let java = runtime_path
-        .join("bin")
-        .join(if cfg!(windows) { "javaw.exe" } else { "java" });
-
-    ilog!(&app, &log_id, "Java path: {}", java.display());
-
-    let engine_libs = engine.join("libraries").join(&instance_id).join(&version);
-    fs::create_dir_all(&engine_libs).ok();
-
-    if loader == "forge" {
-        let forge_already_installed = fs::read_dir(engine.join("versions"))
-            .map(|d| {
-                d.flatten().any(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    name.starts_with(&format!("{}-", version)) && name.contains("forge")
-                })
-            })
-            .unwrap_or(false);
-
-        let engine_libs_empty = fs::read_dir(&engine_libs)
-            .map(|mut d| d.next().is_none())
-            .unwrap_or(true);
-
-        if !forge_already_installed || engine_libs_empty {
-            ilog!(
-                &app,
-                &log_id,
-                "Reinstalling Forge cleanly for {}...",
-                version
-            );
-            let _ = fs::remove_dir_all(&engine_libs);
-            install_forge(&version, &instance_id, &engine, &java, &app, &log_id).await?;
-        } else {
-            ilog!(&app, &log_id, "Forge already installed for {}", version);
-        }
-    }
-    
-    if loader == "neoforge" {
-        let neoforge_already_installed = fs::read_dir(engine.join("versions"))
-            .map(|d| {
-                d.flatten().any(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    name.contains("neoforge") && name.starts_with(&format!("{}-", version))
-                })
-            })
-            .unwrap_or(false);
-
-        let engine_libs_empty = fs::read_dir(&engine_libs)
-            .map(|mut d| d.next().is_none())
-            .unwrap_or(true);
-
-        if !neoforge_already_installed || engine_libs_empty {
-            ilog!(&app, &log_id, "Installing NeoForge for {}...", version);
-            let _ = fs::remove_dir_all(&engine_libs);
-            install_neoforge(&version, &instance_id, &engine, &java, &app, &log_id).await?;
-        } else {
-            ilog!(&app, &log_id, "NeoForge already installed for {}", version);
-        }
-    }
-        
-    let (fabric_main_class, fabric_libs) = if loader == "fabric" {
-        ilog!(
-            &app,
-            &log_id,
-            "Installing Fabric and downloading libraries..."
-        );
-        install_fabric(&version, &engine_libs, &app, &log_id).await?
-    } else {
-        (String::new(), vec![])
-    };
-
-    let indexes_dir = cache_assets.join("indexes");
-    let objects_dir = cache_assets.join("objects");
-    let virtual_dir = cache_assets.join("virtual").join(&parsed.asset_index.id);
-
-    fs::create_dir_all(&indexes_dir).ok();
-    fs::create_dir_all(&objects_dir).ok();
-    fs::create_dir_all(&virtual_dir).ok();
-
-    let index_path = indexes_dir.join(format!("{}.json", parsed.asset_index.id));
-    let index_data = if !index_path.exists() {
-        let data = reqwest::get(&parsed.asset_index.url)
-            .await
-            .map_err(|e| e.to_string())?
-            .text()
-            .await
-            .map_err(|e| e.to_string())?;
-        fs::write(&index_path, &data).map_err(|e| e.to_string())?;
-        data
-    } else {
-        fs::read_to_string(&index_path).map_err(|e| e.to_string())?
-    };
-
-    let json_assets: Value = serde_json::from_str(&index_data).map_err(|e| e.to_string())?;
-    let objects = json_assets["objects"]
-        .as_object()
-        .ok_or("Invalid asset index")?;
-    let total = objects.len();
-    let count = AtomicUsize::new(0);
-    let client = reqwest::Client::new();
-
-    app.emit("asset-status", serde_json::json!({
-        "status": "Downloading assets",
-        "instanceId": &instance.id,
-        "title": &instance.name
-    }).to_string()).ok();
-
-    stream::iter(objects)
-        .for_each_concurrent(256, |(_, obj)| {
-            let client = client.clone();
-            let objects_dir = objects_dir.clone();
-            let app = app.clone();
-            let count = &count;
-            async move {
-                let hash = obj["hash"].as_str().unwrap();
-                let subdir = &hash[0..2];
-                let asset_path = objects_dir.join(subdir).join(hash);
-                if !asset_path.exists() {
-                    let url = format!(
-                        "https://resources.download.minecraft.net/{}/{}",
-                        subdir, hash
-                    );
-                    if let Ok(resp) = client.get(&url).send().await {
-                        if let Ok(bytes) = resp.bytes().await {
-                            if let Some(parent) = asset_path.parent() {
-                                fs::create_dir_all(parent).ok();
-                            }
-                            fs::write(&asset_path, &bytes).ok();
-                        }
-                    }
-                }
-                let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-                app.emit("asset-progress", format!("{}/{}", c, total)).ok();
-            }
-        })
-        .await;
-
-    ilog!(&app, &log_id, "Assets complete");
-    
     let is_offline = token == "none" || token.is_empty();
-    let user_type = if is_offline { "Legacy" } else { "msa" };
-    let effective_token = if is_offline {
-        "0".to_string()
-    } else {
-        token.clone()
-    };
     let effective_uuid = if is_offline {
         offline_uuid(&username)
     } else {
         uuid.clone()
     };
+    let effective_token = if is_offline {
+        "0".to_string()
+    } else {
+        token.clone()
+    };
 
-    ilog!(
-        &app,
-        &log_id,
-        "User type: {} | username: {} | uuid: {}",
-        user_type,
-        username,
-        effective_uuid
-    );
+    let engine_dir = crate::commands::config::get_install_dir_path().join("engine_data");
+    fs::create_dir_all(&engine_dir).ok();
 
     let skin_agent_arg = if is_offline {
         prepare_offline_skin(
@@ -1530,7 +434,7 @@ pub async fn launch_instance_cmd(
             arm_style.as_deref().unwrap_or("wide"),
             &effective_uuid,
             &username,
-            &engine,
+            &engine_dir,
             &app,
             &log_id,
         )
@@ -1539,446 +443,183 @@ pub async fn launch_instance_cmd(
         None
     };
 
-    if skin_agent_arg.is_some() {
-        ilog!(&app, &log_id, "Skin injection ready (authlib-injector)");
+    let loader_type = match loader.as_str() {
+        "fabric" => Some(LoaderType::Fabric),
+        "forge" => Some(LoaderType::Forge),
+        "neoforge" => Some(LoaderType::NeoForge),
+        "quilt" => Some(LoaderType::Quilt),
+        "legacyfabric" | "legacy_fabric" => Some(LoaderType::LegacyFabric),
+        _ => None,
+    };
+
+    let options = LaunchOptions {
+        path: engine_dir.clone(),
+        instance: Some(instance.path.to_string_lossy().into_owned()),
+        version: version.clone(),
+        authenticator: Authenticator {
+            access_token: effective_token,
+            name: username.clone(),
+            uuid: effective_uuid,
+            xbox_account: None,
+            user_properties: None,
+            client_id: None,
+            client_token: None,
+        },
+        loader: LoaderConfig {
+            enable: loader_type.is_some(),
+            loader_type,
+            build: "latest".to_string(),
+            ..Default::default()
+        },
+        memory: MemoryConfig {
+            min: format!("{}M", (ram / 4).max(512)),
+            max: format!("{}M", ram),
+        },
+        screen: ScreenConfig {
+            width: Some(width as u32),
+            height: Some(height as u32),
+            fullscreen,
+        },
+        jvm_args: skin_agent_arg.into_iter().collect(),
+        download_concurrency: 30,
+        timeout_secs: 30,
+        bypass_offline: is_offline,
+        java: JavaOptions::default(),
+        game_args: vec![],
+        verify: false,
+        verify_concurrency: 4,
+        url: None,
+        mcp: None,
+        intel_enabled_mac: false,
+    };
+
+    let (tx, mut rx) = mpsc::channel::<LaunchEvent>(512);
+
+    let app_ev = app.clone();
+    let iid = instance_id.clone();
+    let log_id_ev = log_id.clone();
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                LaunchEvent::Progress {
+                    downloaded,
+                    total,
+                    ref kind,
+                } => match kind.as_str() {
+                    "libraries" | "assets" => {
+                        app_ev
+                            .emit("minecraft-progress", serde_json::json!({ "instanceId": &iid, "current": downloaded, "total": total }))
+                            .ok();
+                    }
+                    "java" => {
+                        let pct = if total > 0 { downloaded * 100 / total } else { 0 };
+                        app_ev
+                            .emit(
+                                "java-download-progress",
+                                serde_json::json!({ "instanceId": &iid, "percent": pct, "status": "Downloading..." }),
+                            )
+                            .ok();
+                    }
+                    _ => {}
+                },
+                LaunchEvent::GameDownloadFinished => {
+                    app_ev
+                        .emit("java-download-done", serde_json::json!({ "instanceId": &iid }))
+                        .ok();
+                    app_ev.emit("minecraft-done", &iid).ok();
+                }
+                LaunchEvent::Check { current, total, ref kind } => {
+                    app_ev
+                        .emit("minecraft-progress", serde_json::json!({ "instanceId": &iid, "current": current, "total": total }))
+                        .ok();
+                    app_ev
+                        .emit("minecraft-status", serde_json::json!({ "instanceId": &iid, "status": format!("Verifying {}...", kind) }))
+                        .ok();
+                }
+                LaunchEvent::Extract(ref name) => {
+                    app_ev
+                        .emit("minecraft-status", serde_json::json!({ "instanceId": &iid, "status": format!("Extracting {}...", name) }))
+                        .ok();
+                }
+                LaunchEvent::Patch(ref name) => {
+                    app_ev
+                        .emit("minecraft-status", serde_json::json!({ "instanceId": &iid, "status": format!("Patching {}...", name), "indeterminate": true }))
+                        .ok();
+                }
+                LaunchEvent::Data(ref line) => {
+                    ilog!(&app_ev, &log_id_ev, "{}", line);
+                }
+                LaunchEvent::Error(ref msg) => {
+                    ilog_err!(&app_ev, &log_id_ev, "{}", msg);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Acquire download slot: wait if another instance is already downloading
+    // the same MC version to avoid concurrent writes to shared library/asset files.
+    loop {
+        {
+            let mut dl = state.downloading.lock().unwrap();
+            if !dl.values().any(|v| v == &version) {
+                dl.insert(instance_id.clone(), version.clone());
+                break;
+            }
+        }
+        ilog!(&app, &log_id, "Waiting for another download of {} to finish...", version);
+        state.download_notify.notified().await;
     }
 
-    let mut cmd = Command::new(&java);
-    cmd.current_dir(&instance_dir);
-    cmd.arg(format!("-Xmx{}M", ram));
-    cmd.arg("-XX:+UnlockExperimentalVMOptions");
-    cmd.arg("-XX:+UseG1GC");
-    cmd.arg("-Dos.name=Windows 10");
-    cmd.arg("-Dos.version=10.0");
-    cmd.arg("-Dorg.lwjgl.util.NoChecks=true");
-    cmd.arg("-Dorg.lwjgl.system.allocator=system");
-    cmd.arg(format!(
-        "-Djava.library.path={}",
-        natives_dir.to_string_lossy()
-    ));
+    ilog!(&app, &log_id, "Downloading game files...");
+    let mut launcher = Launcher::new(options);
+    let download_result = launcher.download_game(tx.clone()).await;
 
-    if let Some(ref agent_arg) = skin_agent_arg {
-        cmd.arg(agent_arg);
-    }
+    // Release download slot regardless of success or failure.
+    state.downloading.lock().unwrap().remove(&instance_id);
+    state.download_notify.notify_waiters();
 
-    if loader == "forge" || loader == "neoforge" {
-        let versions_dir = engine.join("versions");
-    
-        let available: Vec<String> = fs::read_dir(&versions_dir)
-            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
-            .unwrap_or_default();
-        ilog!(&app, &log_id, "Dirs en engine/versions: {:?}", available);
-
-        for entry in fs::read_dir(&versions_dir).unwrap_or_else(|_| fs::read_dir(".").unwrap()).filter_map(Result::ok) {
-            let dir_path = entry.path();
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-            if dir_path.is_dir() {
-                let contents: Vec<String> = fs::read_dir(&dir_path)
-                    .map(|d| d.flatten().map(|f| f.file_name().to_string_lossy().to_string()).collect())
-                    .unwrap_or_default();
-                ilog!(&app, &log_id, "versions/{}: {:?}", dir_name, contents);
-            }
-        }
-        
-        let (forge_dir, forge_version_name) = if loader == "neoforge" {
-            // Log all available version dirs to see what the installer created
-            let all_dirs: Vec<String> = fs::read_dir(&versions_dir)
-                .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
-                .unwrap_or_default();
-            ilog!(&app, &log_id, "All version dirs available: {:?}", all_dirs);
-        
-            let entry = fs::read_dir(&versions_dir)
-                .map_err(|e| e.to_string())?
-                .filter_map(Result::ok)
-                .find(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    name.contains("neoforge") || name.contains("fml")
-                })
-                .ok_or_else(|| format!("NeoForge version directory not found for {}.", version))?;
-            let dir_path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            ilog!(&app, &log_id, "NeoForge using version dir: {}", name);
-            (dir_path, name)
-        } else {
-            let entry = fs::read_dir(&versions_dir)
-                .map_err(|e| e.to_string())?
-                .filter_map(Result::ok)
-                .find(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    name.starts_with(&format!("{}-", version)) && name.contains("forge")
-                })
-                .ok_or_else(|| format!("Forge version directory not found for {}.", version))?;
-            let dir_path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            (dir_path, name)
-        };
-        
-        let forge_json_path = forge_dir.join(format!("{}.json", forge_version_name));
-
-        let forge_json_str = fs::read_to_string(&forge_json_path)
-            .map_err(|e| format!("Could not read forge JSON: {}", e))?;
-        let forge_json_full: Value = serde_json::from_str(&forge_json_str)
-            .map_err(|e| format!("Could not parse forge JSON: {}", e))?;
-        let forge_json: ForgeVersionJson = serde_json::from_str(&forge_json_str)
-            .map_err(|e| format!("Could not parse forge JSON typed: {}", e))?;
-
-        let sep = classpath_separator();
-        let engine_libs_str = engine_libs.to_string_lossy().to_string();
-
-        ilog!(&app, &log_id, "Forge version: {}", forge_version_name);
-
-        if let Some(libs) = forge_json_full["libraries"].as_array() {
-            for lib in libs {
-                if !is_value_library_allowed(lib) {
-                    continue;
-                }
-                if let Some(path_str) = value_library_artifact_path(lib) {
-                    let local = artifact_path(&engine_libs, &path_str);
-                    if local.exists() {
-                        continue;
-                    }
-                    if let Some(parent) = local.parent() {
-                        fs::create_dir_all(parent).ok();
-                    }
-                    if let Some(url_str) = value_library_download_url(lib, &path_str) {
-                        if let Err(e) = download(&url_str, &local).await {
-                            ilog!(
-                                &app,
-                                &log_id,
-                                "Warn downloading Forge lib {}: {}",
-                                path_str,
-                                e
-                            );
-                        }
-                    } else {
-                        ilog!(
-                            &app,
-                            &log_id,
-                            "Warn missing Forge lib without download URL: {}",
-                            path_str
-                        );
-                    }
-                }
-            }
-            ilog!(&app, &log_id, "Forge libraries verified");
-        }
-
-        if let Some(args) = &forge_json.arguments {
-            if let Some(jvm_args) = &args.jvm {
-                for arg in jvm_args {
-                    if let Some(s) = arg.as_str() {
-                        let expanded = s
-                            .replace("${library_directory}", &engine_libs_str)
-                            .replace("${classpath_separator}", sep)
-                            .replace("${version_name}", &forge_version_name);
-                        cmd.arg(expanded);
-                    } else if let Some(obj) = arg.as_object() {
-                        if let Some(val) = obj.get("value") {
-                            if let Some(s) = val.as_str() {
-                                cmd.arg(
-                                    s.replace("${library_directory}", &engine_libs_str)
-                                        .replace("${classpath_separator}", sep)
-                                        .replace("${version_name}", &forge_version_name),
-                                );
-                            } else if let Some(arr) = val.as_array() {
-                                for v in arr {
-                                    if let Some(s) = v.as_str() {
-                                        cmd.arg(
-                                            s.replace("${library_directory}", &engine_libs_str)
-                                                .replace("${classpath_separator}", sep)
-                                                .replace("${version_name}", &forge_version_name),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut forge_artifact_ids: HashSet<String> = HashSet::new();
-        if let Some(libs) = forge_json_full["libraries"].as_array() {
-            for lib in libs {
-                if let Some(name) = lib["name"].as_str() {
-                    if let Some(ga) = library_ga(name) {
-                        forge_artifact_ids.insert(ga);
-                    }
-                }
-            }
-        }
-        let declared_forge_artifact_ids = forge_artifact_ids.clone();
-
-        let mut cp_parts: Vec<String> = Vec::new();
-        let mut seen_cp: HashSet<String> = HashSet::new();
-        push_classpath_path(&mut cp_parts, &mut seen_cp, jar.clone());
-
-        for lib in &parsed.libraries {
-            if !should_use_manifest_library(lib) {
-                continue;
-            }
-            if let Some(name) = lib.name.as_deref() {
-                if let Some(ga) = library_ga(name) {
-                    if declared_forge_artifact_ids.contains(&ga) {
-                        continue;
-                    }
-                }
-            }
-            if let Some(path_str) = manifest_library_artifact_path(lib) {
-                push_classpath_path(
-                    &mut cp_parts,
-                    &mut seen_cp,
-                    artifact_path(&cache_libs, &path_str),
-                );
-            }
-        }
-
-        if let Some(libs) = forge_json_full["libraries"].as_array() {
-            for lib in libs {
-                if !is_value_library_allowed(lib) {
-                    continue;
-                }
-                if let Some(path_str) = value_library_artifact_path(lib) {
-                    push_classpath_path(
-                        &mut cp_parts,
-                        &mut seen_cp,
-                        artifact_path(&engine_libs, &path_str),
-                    );
-                }
-            }
-        }
-
-        let classpath = cp_parts.join(sep);
-        ilog!(&app, &log_id, "CLASSPATH: {}", classpath);
-
-        let argfile_content = format!("-cp\n{}\n{}", classpath, &forge_json.main_class);
-        let argfile_path = instance_dir.join(format!("forge_launch_{}.txt", instance_id));
-        ilog!(&app, &log_id, "main_class: {}", &forge_json.main_class);
-
-        fs::write(&argfile_path, &argfile_content)
-            .map_err(|e| format!("Could not write argfile: {}", e))?;
-        cmd.arg(format!("@{}", argfile_path.display()));
-
-        cmd.args([
-            "--gameDir",
-            instance_dir.to_str().unwrap(),
-            "--assetsDir",
-            cache_assets.to_str().unwrap(),
-            "--assetIndex",
-            &parsed.asset_index.id,
-            "--username",
-            &username,
-            "--uuid",
-            &effective_uuid,
-            "--accessToken",
-            &effective_token,
-            "--userType",
-            user_type,
-            "--version",
-            &forge_version_name,
-            "--width",
-            &width.to_string(),
-            "--height",
-            &height.to_string(),
-            "--fml.libraryDirectory",
-            &engine_libs_str,
-        ]);
-
-        if let Some(args) = &forge_json.arguments {
-            if let Some(game_args) = &args.game {
-                for arg in game_args {
-                    if let Some(s) = arg.as_str() {
-                        cmd.arg(s);
-                    }
-                }
-            }
-        }
-    } else if loader == "fabric" {
-        let sep = if cfg!(windows) { ";" } else { ":" };
-        let mut cp_parts: Vec<String> = vec![jar.to_string_lossy().to_string()];
-
-        ilog!(&app, &log_id, "gameDir: {}", instance_dir.display());
-        ilog!(&app, &log_id, "mods exists: {}", instance_dir.join("mods").exists());
-        ilog!(&app, &log_id, "mods count: {}", fs::read_dir(instance_dir.join("mods")).map(|d| d.count()).unwrap_or(0));
-
-        if cache_libs.exists() {
-            for entry in WalkDir::new(&cache_libs).into_iter().filter_map(Result::ok) {
-                let path = entry.path();
-                if path.extension().map(|e| e == "jar").unwrap_or(false) {
-                    let path_str = path.to_string_lossy().to_string();
-                    if !cp_parts.contains(&path_str) {
-                        cp_parts.push(path_str);
-                    }
-                }
-            }
-        }
-
-        for lib_path in &fabric_libs {
-            if lib_path.exists() {
-                let path_str = lib_path.to_string_lossy().to_string();
-                if !cp_parts.contains(&path_str) {
-                    cp_parts.push(path_str);
-                }
-            }
-        }
-
-        if engine_libs.exists() {
-            for entry in WalkDir::new(&engine_libs).into_iter().filter_map(Result::ok) {
-                let path = entry.path();
-                if path.extension().map(|e| e == "jar").unwrap_or(false) {
-                    let path_str = path.to_string_lossy().to_string();
-                    if !cp_parts.contains(&path_str) {
-                        cp_parts.push(path_str);
-                    }
-                }
-            }
-        }
-
-        let classpath = cp_parts.join(sep);
-        let main_class = if fabric_main_class.is_empty() {
-            "net.fabricmc.loader.impl.launch.knot.KnotClient"
-        } else {
-            &fabric_main_class
-        };
-
-        ilog!(&app, &log_id, "Fabric main_class: {}", main_class);
-        ilog!(&app, &log_id, "Fabric classpath entries: {}", cp_parts.len());
-
-        cmd.args([
-            "-cp",
-            &classpath,
-            main_class,
-            "--gameDir",
-            instance_dir.to_str().unwrap(),
-            "--assetsDir",
-            cache_assets.to_str().unwrap(),
-            "--assetIndex",
-            &parsed.asset_index.id,
-            "--username",
-            &username,
-            "--uuid",
-            &effective_uuid,
-            "--accessToken",
-            &effective_token,
-            "--userType",
-            user_type,
-            "--version",
-            &version,
-            "--width",
-            &width.to_string(),
-            "--height",
-            &height.to_string(),
-        ]);
-    } else {
-        let sep = if cfg!(windows) { ";" } else { ":" };
-        let mut cp_parts: Vec<String> = vec![jar.to_string_lossy().to_string()];
-
-        if cache_libs.exists() {
-            for entry in WalkDir::new(&cache_libs).into_iter().filter_map(Result::ok) {
-                let path = entry.path();
-                if path.extension().map(|e| e == "jar").unwrap_or(false) {
-                    cp_parts.push(path.to_string_lossy().to_string());
-                }
-            }
-        }
-
-        let classpath = cp_parts.join(sep);
-
-        ilog!(&app, &log_id, "Vanilla classpath entries: {}", cp_parts.len());
-
-        cmd.args([
-            "-cp",
-            &classpath,
-            "net.minecraft.client.main.Main",
-            "--gameDir",
-            instance_dir.to_str().unwrap(),
-            "--assetsDir",
-            cache_assets.to_str().unwrap(),
-            "--assetIndex",
-            &parsed.asset_index.id,
-            "--username",
-            &username,
-            "--uuid",
-            &effective_uuid,
-            "--accessToken",
-            &effective_token,
-            "--userType",
-            user_type,
-            "--version",
-            &version,
-            "--width",
-            &width.to_string(),
-            "--height",
-            &height.to_string(),
-        ]);
-    }
-
-    if fullscreen {
-        cmd.arg("--fullscreen");
-    }
+    download_result.map_err(|e| e.to_string())?;
 
     ilog!(&app, &log_id, "Launching Minecraft...");
+    let mut child = launcher.launch(tx).await.map_err(|e| e.to_string())?;
 
-    #[cfg(windows)]
-    cmd.creation_flags(0x08000000);
+    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+    state.running.lock().unwrap().insert(instance_id.clone(), kill_tx);
+    state.playtime.lock().unwrap().insert(instance_id.clone(), std::time::Instant::now());
 
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Error launching Minecraft: {}", e))?;
-    
-    {
-        let mut pid = state.minecraft_pid.lock().unwrap();
-        *pid = Some(child.id());
-    }
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    
-    let app_stdout = app.clone();
-    let log_id_stdout = log_id.clone();
-    if let Some(stdout) = stdout {
-        std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().flatten() {
-                ilog!(&app_stdout, &log_id_stdout, "{}", line);
+    let running_ev = state.running.clone();
+    let playtime_ev = state.playtime.clone();
+    let app_ev2 = app.clone();
+    let id_ev2 = instance_id.clone();
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = child.wait() => {}
+            _ = kill_rx => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
             }
-        });
-    }
-    
-    let app_stderr = app.clone();
-    let log_id_stderr = log_id.clone();
-    if let Some(stderr) = stderr {
-        std::thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
-                ilog!(&app_stderr, &log_id_stderr, "{}", line);
-            }
-        });
-    }
-    
-    {
-        let mut start = state.playtime_start.lock().unwrap();
-        *start = Some((instance_id.clone(), std::time::Instant::now()));
-    }
-
-    child.wait().map_err(|e| format!("Error waiting for Minecraft: {}", e))?;
-
-    {
-        let mut start = state.playtime_start.lock().unwrap();
-        if let Some((id, instant)) = start.take() {
-            let elapsed = instant.elapsed().as_secs();
-            save_playtime(&app, &id, elapsed);
         }
-    }
 
-    app.emit("minecraft-closed", ()).ok();
+        running_ev.lock().unwrap().remove(&id_ev2);
+
+        let elapsed = playtime_ev
+            .lock()
+            .unwrap()
+            .remove(&id_ev2)
+            .map(|start| start.elapsed().as_secs())
+            .unwrap_or(0);
+        if elapsed > 0 {
+            save_playtime(&app_ev2, &id_ev2, elapsed);
+        }
+
+        app_ev2.emit("minecraft-closed", &id_ev2).ok();
+    });
+
     Ok(())
 }
+
 
 async fn download_authlib_injector(path: &PathBuf, app: &AppHandle, log_id: &str) -> Result<(), String> {
     if path.exists() {
@@ -2052,53 +693,7 @@ async fn prepare_offline_skin(
     ))
 }
 
-fn build_classpath_no_jar(lib_dirs: &[&PathBuf], exclude: &HashSet<String>) -> String {
-    let mut paths: Vec<String> = vec![];
-    for dir in lib_dirs {
-        if !dir.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
-            let path = entry.path();
-            if path.extension().map(|e| e == "jar").unwrap_or(false) {
-                let fname = path
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if !exclude.contains(&fname) {
-                    paths.push(path.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-    paths.join(if cfg!(windows) { ";" } else { ":" })
-}
 
-fn build_classpath_exclude(
-    lib_dirs: &[&PathBuf],
-    jar: &PathBuf,
-    exclude: &HashSet<String>,
-) -> String {
-    let mut paths = vec![jar.to_string_lossy().to_string()];
-    for dir in lib_dirs {
-        if !dir.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
-            let path = entry.path();
-            if path.extension().map(|e| e == "jar").unwrap_or(false) {
-                let fname = path
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if !exclude.contains(&fname) {
-                    paths.push(path.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-    paths.join(if cfg!(windows) { ";" } else { ":" })
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalInstance {
@@ -2570,7 +1165,7 @@ async fn import_mrpack_file(app: &AppHandle, path: &str) -> Result<LocalInstance
         .timeout(std::time::Duration::from_secs(300))
         .build().unwrap_or_default();
 
-    app.emit("install-status", format!("Downloading {} files...", total)).ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": &id, "status": format!("Downloading {} files...", total) })).ok();
 
     let count = std::sync::atomic::AtomicUsize::new(0);
     stream::iter(files)
@@ -2578,6 +1173,7 @@ async fn import_mrpack_file(app: &AppHandle, path: &str) -> Result<LocalInstance
             let client = client.clone();
             let dest_dir = dest_dir.clone();
             let app = app.clone();
+            let iid = id.clone();
             let count = &count;
             async move {
                 let file_path = file["path"].as_str().unwrap_or("").to_string();
@@ -2586,7 +1182,7 @@ async fn import_mrpack_file(app: &AppHandle, path: &str) -> Result<LocalInstance
                 if let Some(parent) = dest.parent() { fs::create_dir_all(parent).ok(); }
                 if dest.exists() {
                     let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-                    app.emit("install-progress", format!("{}/{}", c, total)).ok();
+                    app.emit("instance-progress", serde_json::json!({ "instanceId": &iid, "current": c, "total": total })).ok();
                     return;
                 }
                 let downloads = file["downloads"].as_array().cloned().unwrap_or_default();
@@ -2601,12 +1197,12 @@ async fn import_mrpack_file(app: &AppHandle, path: &str) -> Result<LocalInstance
                     }
                 }
                 let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-                app.emit("install-progress", format!("{}/{}", c, total)).ok();
+                app.emit("instance-progress", serde_json::json!({ "instanceId": &iid, "current": c, "total": total })).ok();
             }
         })
         .await;
 
-    app.emit("install-status", "Extracting overrides...").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": &id, "status": "Extracting overrides..." })).ok();
     let cursor2 = std::io::Cursor::new(&zip_bytes);
     let mut archive2 = zip::ZipArchive::new(cursor2).map_err(|e| e.to_string())?;
     for i in 0..archive2.len() {
@@ -2626,8 +1222,8 @@ async fn import_mrpack_file(app: &AppHandle, path: &str) -> Result<LocalInstance
         }
     }
 
-    app.emit("install-status", "").ok();
-    app.emit("install-done", &id).ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": &id, "status": "" })).ok();
+    app.emit("instance-done", &id).ok();
 
     let inst = LocalInstance {
         id: id.clone(),
@@ -2691,7 +1287,7 @@ async fn import_curseforge_zip(app: &AppHandle, path: &str) -> Result<LocalInsta
     let mods_dir = dest_dir.join("mods");
     fs::create_dir_all(&mods_dir).ok();
 
-    app.emit("install-status", format!("Downloading {} mods...", total)).ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": &id, "status": format!("Downloading {} mods...", total) })).ok();
 
     for (i, file) in files.iter().enumerate() {
         let project_id = file["projectID"].as_u64().unwrap_or(0);
@@ -2720,10 +1316,10 @@ async fn import_curseforge_zip(app: &AppHandle, path: &str) -> Result<LocalInsta
                 }
             }
         }
-        app.emit("install-progress", format!("{}/{}", i + 1, total)).ok();
+        app.emit("instance-progress", serde_json::json!({ "instanceId": &id, "current": i + 1, "total": total })).ok();
     }
 
-    app.emit("install-status", "Extracting overrides...").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": &id, "status": "Extracting overrides..." })).ok();
     let cursor2 = std::io::Cursor::new(&zip_bytes);
     let mut archive2 = zip::ZipArchive::new(cursor2).map_err(|e| e.to_string())?;
     for i in 0..archive2.len() {
@@ -2743,8 +1339,8 @@ async fn import_curseforge_zip(app: &AppHandle, path: &str) -> Result<LocalInsta
         }
     }
 
-    app.emit("install-status", "").ok();
-    app.emit("install-done", &id).ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": &id, "status": "" })).ok();
+    app.emit("instance-done", &id).ok();
 
     let inst = LocalInstance {
         id: id.clone(),
@@ -2860,7 +1456,7 @@ pub async fn install_modrinth_modpack(
         }
     };
 
-    app.emit("install-status", "Fetching modpack version...").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": &id, "status": "Fetching modpack version..." })).ok();
 
     let versions: serde_json::Value = client
         .get(format!(
@@ -2927,7 +1523,7 @@ pub async fn install_modrinth_modpack(
         .ok_or("No .mrpack file found")?
         .to_string();
 
-    app.emit("install-status", "Downloading modpack...").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": &id, "status": "Downloading modpack..." })).ok();
 
     let mrpack_bytes = client
         .get(&mrpack_url)
@@ -2955,8 +1551,8 @@ pub async fn install_modrinth_modpack(
     let files = index["files"].as_array().cloned().unwrap_or_default();
     let total = files.len();
 
-    app.emit("install-status", "Downloading mods...").ok();
-    app.emit("install-progress", format!("0/{}", total)).ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": &id, "status": "Downloading mods..." })).ok();
+    app.emit("instance-progress", serde_json::json!({ "instanceId": &id, "current": 0u64, "total": total })).ok();
 
     let count = std::sync::atomic::AtomicUsize::new(0);
 
@@ -2966,6 +1562,7 @@ pub async fn install_modrinth_modpack(
             let dir = dir.clone();
             let app = app.clone();
             let count = &count;
+            let iid = id.clone();
             async move {
                 let path_str = file["path"].as_str().unwrap_or("").to_string();
                 if path_str.is_empty() {
@@ -2978,7 +1575,7 @@ pub async fn install_modrinth_modpack(
                 }
                 if dest.exists() {
                     let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-                    app.emit("install-progress", format!("{}/{}", c, total)).ok();
+                    app.emit("instance-progress", serde_json::json!({ "instanceId": &iid, "current": c, "total": total })).ok();
                     return;
                 }
                 let downloads = file["downloads"].as_array().cloned().unwrap_or_default();
@@ -2993,12 +1590,12 @@ pub async fn install_modrinth_modpack(
                     }
                 }
                 let c = count.fetch_add(1, Ordering::Relaxed) + 1;
-                app.emit("install-progress", format!("{}/{}", c, total)).ok();
+                app.emit("instance-progress", serde_json::json!({ "instanceId": &iid, "current": c, "total": total })).ok();
             }
         })
         .await;
 
-    app.emit("install-status", "Extracting overrides...").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": &id, "status": "Extracting overrides..." })).ok();
 
     let cursor = std::io::Cursor::new(&mrpack_bytes);
     let mut archive =
@@ -3027,8 +1624,8 @@ pub async fn install_modrinth_modpack(
         }
     }
 
-    app.emit("install-status", "").ok();
-    app.emit("install-done", &id).ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": &id, "status": "" })).ok();
+    app.emit("instance-done", &id).ok();
 
     let inst = LocalInstance {
         id: id.clone(),
@@ -3115,21 +1712,25 @@ pub fn get_instance_worlds(app: AppHandle, instance_id: String) -> Vec<WorldInfo
 }
 
 #[command]
-pub fn kill_minecraft(state: State<'_, AppState>) -> Result<(), String> {
-    let pid = state.minecraft_pid.lock().unwrap().take();
-    if let Some(pid) = pid {
-        #[cfg(windows)]
-        {
-            Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .output().ok();
-        }
-        #[cfg(not(windows))]
-        {
-            Command::new("kill").arg(pid.to_string()).output().ok();
-        }
-    }
+pub async fn stop_instance(instance_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let kill_tx = state
+        .running
+        .lock()
+        .unwrap()
+        .remove(&instance_id)
+        .ok_or_else(|| format!("Instance '{}' is not running", instance_id))?;
+    let _ = kill_tx.send(());
     Ok(())
+}
+
+#[command]
+pub fn get_running_instances(state: State<'_, AppState>) -> Vec<String> {
+    state.running.lock().unwrap().keys().cloned().collect()
+}
+
+#[command]
+pub fn get_downloading_instances(state: State<'_, AppState>) -> HashMap<String, String> {
+    state.downloading.lock().unwrap().clone()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { createPortal } from "react-dom";
-import { Button, Input, Label, TextField, toast } from "@heroui/react";
+import { toast } from "@heroui/react";
 import {
   IconBox, IconCheck, IconChevronDown, IconChevronLeft, IconChevronRight,
   IconFolderOpen, IconPhoto, IconPlayerPlay, IconPlus,
@@ -94,7 +94,13 @@ interface InstanceLog {
 const LOADER_EMOJI: Record<Loader, string> = {
   vanilla: "🌿", fabric: "🧵", forge: "⚒️", neoforge: "🔥",
 };
-const LOADERS: Loader[] = ["vanilla", "fabric", "forge", "neoforge"];
+
+const SUGGESTED_MODPACKS = [
+  { name: "None", slug: "" },
+  { name: "Fabulously Optimized", slug: "fabulously-optimized" },
+  { name: "Sop", slug: "sop" },
+  { name: "Adrenaline", slug: "adrenaline" },
+];
 
 const SORT_OPTIONS = ["Relevance", "Downloads", "Follows", "Newest", "Updated"];
 const VIEW_OPTIONS = ["10", "20", "50"];
@@ -347,49 +353,6 @@ function VersionDropdown({ value, onChange, versions, loading }: {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function LoaderPill({ value, selected, onClick }: { value: Loader; selected: boolean; onClick: () => void }) {
-  return (
-    <button type="button" onClick={onClick}
-      className={["flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-all",
-        selected ? "bg-accent/15 border-accent/40 text-accent" : "bg-transparent border-border text-muted hover:text-foreground"].join(" ")}>
-      {selected && <IconCheck size={11} />}
-      {value.charAt(0).toUpperCase() + value.slice(1)}
-    </button>
-  );
-}
-
-function ImagePickRow({ label, previewSrc, onPick, onClear, icon }: {
-  label: string; previewSrc: string | null; onPick: () => void; onClear: () => void; icon: React.ReactNode;
-}) {
-  const url = toUrl(previewSrc);
-  return (
-    <div className="flex items-center gap-3">
-      <div onClick={onPick}
-        className="w-16 h-12 rounded-[15px] border border-border bg-surface flex items-center justify-center overflow-hidden flex-shrink-0 cursor-pointer hover:border-accent/40 transition-colors relative group">
-        {url ? <img src={url} className="w-full h-full object-cover" alt="" /> : <span className="text-muted">{icon}</span>}
-        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-          <IconUpload size={14} className="text-white" />
-        </div>
-      </div>
-      <div className="flex flex-col gap-1.5 flex-1">
-        <span className="text-xs text-muted">{label}</span>
-        <div className="flex gap-1.5">
-          <button type="button" onClick={onPick}
-            className="flex items-center gap-1.5 text-xs text-muted hover:text-foreground border border-border px-2.5 py-1 rounded-[10px] transition-colors">
-            <IconUpload size={11} /> Choose
-          </button>
-          {previewSrc && (
-            <button type="button" onClick={onClear}
-              className="flex items-center gap-1.5 text-xs text-danger/70 hover:text-danger border border-border px-2.5 py-1 rounded-[10px] transition-colors">
-              <IconX size={11} /> Remove
-            </button>
-          )}
-        </div>
-      </div>
     </div>
   );
 }
@@ -1215,33 +1178,6 @@ function InstancesGridView({ instances, activeTab, setActiveTab, onSelect, onCre
 
 interface FileNode { name: string; path: string; isDir: boolean; children?: FileNode[]; checked: boolean; indeterminate?: boolean; }
 
-function FileTreeNode({ node, depth, onToggle }: { node: FileNode; depth: number; onToggle: (path: string, checked: boolean) => void }) {
-  const [expanded, setExpanded] = useState(depth === 0);
-  return (
-    <div>
-      <div className="flex items-center gap-1.5 py-1 px-2 rounded-[8px] hover:bg-white/[0.03] transition-colors group"
-        style={{ paddingLeft: `${8 + depth * 16}px` }}>
-        {node.isDir && (
-          <button type="button" onClick={() => setExpanded(v => !v)} className="text-muted hover:text-foreground transition-colors flex-shrink-0">
-            <IconChevronDown size={12} className={`transition-transform ${expanded ? "" : "-rotate-90"}`} />
-          </button>
-        )}
-        {!node.isDir && <span className="w-4 flex-shrink-0" />}
-        <div className={["w-4 h-4 rounded-[4px] border flex items-center justify-center flex-shrink-0 cursor-pointer transition-all",
-          node.checked ? "bg-[#22c55e] border-[#22c55e]" : node.indeterminate ? "bg-[#22c55e]/30 border-[#22c55e]/50" : "border-border bg-transparent hover:border-[#22c55e]/40"].join(" ")}
-          onClick={() => onToggle(node.path, !node.checked)}>
-          {node.checked && <IconCheck size={10} className="text-black" strokeWidth={3} />}
-          {node.indeterminate && !node.checked && <div className="w-2 h-0.5 bg-[#22c55e] rounded-full" />}
-        </div>
-        <span className={`text-xs truncate ${node.isDir ? "text-foreground font-medium" : "text-muted"}`}>{node.name}</span>
-      </div>
-      {node.isDir && expanded && node.children && (
-        <div>{node.children.map(child => <FileTreeNode key={child.path} node={child} depth={depth + 1} onToggle={onToggle} />)}</div>
-      )}
-    </div>
-  );
-}
-
 function ExportModal({ instance, onClose }: { instance: LocalInstance; onClose: () => void }) {
   const [exporting, setExporting] = useState(false);
   const [done, setDone] = useState(false);
@@ -1250,161 +1186,202 @@ function ExportModal({ instance, onClose }: { instance: LocalInstance; onClose: 
   const [modpackName, setModpackName] = useState(instance.title);
   const [version, setVersion] = useState("1.0.0");
   const [description, setDescription] = useState("");
-  const [includeImages, setIncludeImages] = useState(true);
-  const [fileTreeOpen, setFileTreeOpen] = useState(false);
+  const [fileListOpen, setFileListOpen] = useState(false);
   const [fileTree, setFileTree] = useState<FileNode[]>([
-    { name: "mods", path: "mods", isDir: true, checked: true, children: [] },
-    { name: "config", path: "config", isDir: true, checked: true, children: [] },
-    { name: "resourcepacks", path: "resourcepacks", isDir: true, checked: true, children: [] },
-    { name: "shaderpacks", path: "shaderpacks", isDir: true, checked: false, children: [] },
+    { name: "mods/", path: "mods", isDir: true, checked: true, children: [] },
+    { name: "config/", path: "config", isDir: true, checked: true, children: [] },
+    { name: "resourcepacks/", path: "resourcepacks", isDir: true, checked: true, children: [] },
+    { name: "shaderpacks/", path: "shaderpacks", isDir: true, checked: false, children: [] },
     { name: "options.txt", path: "options.txt", isDir: false, checked: false },
     { name: "servers.dat", path: "servers.dat", isDir: false, checked: false },
     { name: "servers.dat_old", path: "servers.dat_old", isDir: false, checked: false },
     { name: "gameData.json", path: "gameData.json", isDir: false, checked: false },
   ]);
 
-  const handleToggle = (path: string, checked: boolean) => { setFileTree(prev => toggleNode(prev, path, checked)); };
-  function toggleNode(nodes: FileNode[], path: string, checked: boolean): FileNode[] {
-    return nodes.map(n => {
-      if (n.path === path) return { ...n, checked, children: n.children ? toggleAllChildren(n.children, checked) : undefined };
-      if (n.children) {
-        const newChildren = toggleNode(n.children, path, checked);
-        const allChecked = newChildren.every(c => c.checked);
-        const someChecked = newChildren.some(c => c.checked || c.indeterminate);
-        return { ...n, children: newChildren, checked: allChecked, indeterminate: !allChecked && someChecked };
-      }
-      return n;
-    });
-  }
-  function toggleAllChildren(nodes: FileNode[], checked: boolean): FileNode[] {
-    return nodes.map(n => ({ ...n, checked, children: n.children ? toggleAllChildren(n.children, checked) : undefined }));
-  }
-  const selectedCount = countSelected(fileTree);
-  function countSelected(nodes: FileNode[]): number {
-    return nodes.reduce((acc, n) => {
-      if (n.isDir) return acc + (n.checked || n.indeterminate ? 1 : 0) + countSelected(n.children ?? []);
-      return acc + (n.checked ? 1 : 0);
-    }, 0);
-  }
+  const handleToggle = (path: string, checked: boolean) => {
+    setFileTree(prev => prev.map(n => n.path === path ? { ...n, checked } : n));
+  };
+
   const handleExport = async () => {
     if (!modpackName.trim()) return;
     setExporting(true); setError(null);
-    const options: Record<string, boolean> = { include_images: includeImages };
-    fileTree.forEach(n => { options[n.path] = n.checked || !!n.indeterminate; });
+    const options: Record<string, boolean> = { include_images: true };
+    fileTree.forEach(n => { options[n.path] = n.checked; });
     try {
       const path = await invoke<string>("export_local_instance", { id: instance.id, options });
       setExportPath(path); setDone(true);
     } catch (e) { if (!String(e).includes("cancelled")) setError(String(e)); }
     finally { setExporting(false); }
   };
-  const iconUrl = toUrl(instance.icon_path);
+
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
-      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="rounded-2xl w-[500px] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden"
-        style={{ backgroundColor: "var(--color-overlay)", border: "1px solid rgba(255,255,255,0.08)" }}>
-        <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-[10px] overflow-hidden flex items-center justify-center flex-shrink-0" style={{ backgroundColor: "var(--color-surface)" }}>
-              {iconUrl ? <img src={iconUrl} className="w-full h-full object-cover" alt="" /> : <span className="text-base">{LOADER_EMOJI[instance.loader as Loader] ?? "📦"}</span>}
-            </div>
-            <div>
-              <p className="text-sm font-semibold text-foreground leading-none">Export modpack</p>
-              <p className="text-xs text-muted mt-0.5">{instance.title}</p>
-            </div>
-          </div>
-          <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-[8px] text-muted hover:text-foreground hover:bg-white/5 transition-colors"><IconX size={15} /></button>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        className="rounded-[14px] w-[500px] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden"
+        style={{ backgroundColor: "var(--color-overlay)", border: "1px solid rgba(255,255,255,0.08)" }}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-5">
+          <h2 className="text-[17px] font-semibold text-foreground">Export modpack</h2>
+          <button
+            onClick={onClose}
+            className="w-7 h-7 flex items-center justify-center rounded-[8px] text-muted transition-colors hover:bg-white/5 hover:text-foreground"
+          >
+            <IconX size={16} />
+          </button>
         </div>
+
         <div className="flex-1 overflow-y-auto">
-          <div className="px-5 py-4 flex flex-col gap-4">
-            <div className="flex gap-3">
-              <div className="flex flex-col gap-1.5 flex-1">
-                <label className="text-xs font-medium text-muted">Modpack Name</label>
-                <div className="flex items-center gap-2 px-3 py-2 rounded-[12px] border border-border focus-within:border-[#22c55e]/40 transition-colors" style={{ backgroundColor: "var(--color-surface)" }}>
+          <div className="px-6 pb-5 flex flex-col gap-4">
+
+            {/* Name + Version */}
+            <div className="grid gap-3" style={{ gridTemplateColumns: "1fr 112px" }}>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[11px] font-medium text-muted">Modpack Name</label>
+                <div
+                  className="flex items-center gap-2 px-3 py-2 rounded-[9px] border border-border transition-colors focus-within:border-[#22c55e]/40"
+                  style={{ backgroundColor: "var(--color-surface)" }}
+                >
                   <IconBox size={13} className="text-muted flex-shrink-0" />
-                  <input value={modpackName} onChange={e => setModpackName(e.target.value)}
-                    className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted focus:outline-none min-w-0" placeholder="My modpack..." />
-                  {modpackName && <button onClick={() => setModpackName("")} className="text-muted hover:text-foreground transition-colors"><IconX size={12} /></button>}
+                  <input
+                    value={modpackName}
+                    onChange={e => setModpackName(e.target.value)}
+                    className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted focus:outline-none min-w-0"
+                    placeholder="My modpack..."
+                  />
+                  {modpackName && (
+                    <button onClick={() => setModpackName("")} className="text-muted hover:text-foreground transition-colors flex-shrink-0">
+                      <IconX size={12} />
+                    </button>
+                  )}
                 </div>
               </div>
-              <div className="flex flex-col gap-1.5 w-28">
-                <label className="text-xs font-medium text-muted">Version</label>
-                <div className="flex items-center gap-2 px-3 py-2 rounded-[12px] border border-border focus-within:border-[#22c55e]/40 transition-colors" style={{ backgroundColor: "var(--color-surface)" }}>
-                  <input value={version} onChange={e => setVersion(e.target.value)}
-                    className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted focus:outline-none min-w-0" placeholder="1.0.0" />
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[11px] font-medium text-muted">Version number</label>
+                <div
+                  className="flex items-center gap-2 px-3 py-2 rounded-[9px] border border-border transition-colors focus-within:border-[#22c55e]/40"
+                  style={{ backgroundColor: "var(--color-surface)" }}
+                >
+                  <IconChevronRight size={13} className="text-muted flex-shrink-0" />
+                  <input
+                    value={version}
+                    onChange={e => setVersion(e.target.value)}
+                    className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted focus:outline-none min-w-0"
+                    placeholder="1.0.0"
+                  />
+                  {version && (
+                    <button onClick={() => setVersion("")} className="text-muted hover:text-foreground transition-colors flex-shrink-0">
+                      <IconX size={12} />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
+
+            {/* Description */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted">Description <span className="opacity-40">(optional)</span></label>
-              <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="What's special about this modpack..." rows={2}
-                className="px-3 py-2.5 rounded-[12px] border border-border text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-[#22c55e]/40 resize-none transition-colors"
-                style={{ backgroundColor: "var(--color-surface)" }} />
+              <label className="text-[11px] font-medium text-muted">Description</label>
+              <textarea
+                value={description}
+                onChange={e => setDescription(e.target.value)}
+                placeholder="Enter modpack description..."
+                rows={3}
+                className="px-3 py-2.5 rounded-[9px] border border-border text-sm text-foreground placeholder:text-muted focus:outline-none resize-none transition-colors focus:border-[#22c55e]/40"
+                style={{ backgroundColor: "var(--color-surface)" }}
+              />
             </div>
-            <div className="flex items-center gap-3">
-              <div className="h-px flex-1" style={{ backgroundColor: "rgba(255,255,255,0.06)" }} />
-              <span className="text-[10px] text-muted uppercase tracking-widest">Include</span>
-              <div className="h-px flex-1" style={{ backgroundColor: "rgba(255,255,255,0.06)" }} />
-            </div>
-            <div onClick={() => setIncludeImages(v => !v)}
-              className="flex items-center gap-3 px-3.5 py-3 rounded-[12px] border cursor-pointer transition-all"
-              style={{ backgroundColor: includeImages ? "rgba(34,197,94,0.06)" : "var(--color-surface)", borderColor: includeImages ? "rgba(34,197,94,0.25)" : "var(--color-border)" }}>
-              <div className={["w-9 h-9 rounded-[10px] flex items-center justify-center flex-shrink-0 transition-colors", includeImages ? "bg-[#22c55e]/15" : "bg-white/5"].join(" ")}>
-                <IconPhoto size={17} className={includeImages ? "text-[#22c55e]" : "text-muted"} />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className={["text-sm font-medium transition-colors", includeImages ? "text-foreground" : "text-muted"].join(" ")}>Icon and background</p>
-                <p className="text-xs text-muted mt-0.5">Instance icon and background image</p>
-              </div>
-              <div className={["w-5 h-5 rounded-[6px] border flex items-center justify-center flex-shrink-0 transition-all", includeImages ? "bg-[#22c55e] border-[#22c55e]" : "border-border bg-transparent"].join(" ")}>
-                {includeImages && <IconCheck size={11} className="text-black" strokeWidth={3} />}
-              </div>
-            </div>
-            <div>
-              <button type="button" onClick={() => setFileTreeOpen(v => !v)}
-                className="w-full flex items-center justify-between px-4 py-3 rounded-[12px] border border-border transition-colors hover:border-white/10"
-                style={{ backgroundColor: "var(--color-surface)" }}>
-                <div className="flex items-center gap-2">
-                  <IconFolderOpen size={14} className="text-muted" />
-                  <span className="text-sm text-foreground">Files and folders</span>
-                  {selectedCount > 0 && <span className="px-1.5 py-0.5 rounded-[6px] bg-[#22c55e]/15 text-[#22c55e] text-xs font-semibold">{selectedCount}</span>}
+
+            {/* File list */}
+            <div className="rounded-[10px] overflow-hidden border border-border" style={{ backgroundColor: "var(--color-surface)" }}>
+              <button
+                type="button"
+                onClick={() => setFileListOpen(v => !v)}
+                className="w-full flex items-center justify-between px-4 py-3 transition-colors hover:bg-white/[0.03]"
+              >
+                <div className="flex items-center gap-2.5">
+                  <IconAdjustments size={14} className="text-muted" />
+                  <span className="text-sm font-medium text-foreground">
+                    Configure which files are included in this export
+                  </span>
                 </div>
-                <IconChevronDown size={13} className={["text-muted transition-transform", fileTreeOpen ? "rotate-180" : ""].join(" ")} />
+                <IconChevronDown
+                  size={14}
+                  className={`text-muted transition-transform ${fileListOpen ? "rotate-180" : ""}`}
+                />
               </button>
-              {fileTreeOpen && (
-                <div className="mt-1 rounded-[12px] border border-border overflow-hidden" style={{ backgroundColor: "var(--color-surface)" }}>
-                  <div className="max-h-52 overflow-y-auto py-1.5">
-                    {fileTree.map(node => <FileTreeNode key={node.path} node={node} depth={0} onToggle={handleToggle} />)}
-                  </div>
+
+              {fileListOpen && (
+                <div className="border-t border-border">
+                  {fileTree.map((node, i) => (
+                    <div
+                      key={node.path}
+                      onClick={() => handleToggle(node.path, !node.checked)}
+                      className="flex items-center justify-between px-4 py-2.5 transition-colors cursor-pointer hover:bg-white/[0.03]"
+                      style={{ borderTop: i === 0 ? "none" : "0.5px solid var(--color-border)" }}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div
+                          className={[
+                            "flex items-center justify-center flex-shrink-0 transition-all rounded-[5px]",
+                            node.checked ? "bg-[#22c55e]" : "border border-border bg-transparent",
+                          ].join(" ")}
+                          style={{ width: 17, height: 17 }}
+                        >
+                          {node.checked && <IconCheck size={11} className="text-black" strokeWidth={3} />}
+                        </div>
+                        <span className={`text-sm ${node.isDir ? "text-foreground" : "text-muted"}`}>
+                          {node.name}
+                        </span>
+                      </div>
+                      {node.isDir && <IconChevronDown size={13} className="text-muted opacity-40" />}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
-            {error && <div className="px-3 py-2.5 rounded-[12px] bg-danger/10 border border-danger/20 text-xs text-danger">{error}</div>}
+
+            {error && (
+              <div className="px-3 py-2.5 rounded-[10px] bg-danger/10 border border-danger/20 text-xs text-danger">
+                {error}
+              </div>
+            )}
             {done && exportPath && (
-              <div className="px-3 py-2.5 rounded-[12px] bg-[#22c55e]/10 border border-[#22c55e]/20 flex items-start gap-2">
+              <div className="px-3 py-2.5 rounded-[10px] bg-[#22c55e]/10 border border-[#22c55e]/20 flex items-start gap-2">
                 <IconCheck size={13} className="text-[#22c55e] flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-xs text-[#22c55e] font-semibold">Exported successfully!</p>
+                  <p className="text-xs font-semibold text-[#22c55e]">Exported successfully!</p>
                   <p className="text-[11px] text-muted mt-0.5 break-all font-mono">{exportPath}</p>
                 </div>
               </div>
             )}
           </div>
         </div>
-        <div className="flex gap-2 items-center justify-between px-5 py-4" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
-          <p className="text-xs text-muted">{selectedCount} folder{selectedCount !== 1 ? "s" : ""} · {includeImages ? "with" : "without"} images</p>
-          <div className="flex gap-2">
-            <button onClick={onClose} className="flex items-center gap-1.5 px-4 py-2 rounded-[10px] text-sm text-muted hover:text-foreground border border-border hover:bg-white/5 transition-colors">
-              {done ? "Close" : "Cancel"}
+
+        {/* Footer */}
+        <div
+          className="flex items-center justify-end gap-2 px-6 py-4"
+          style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}
+        >
+          <button
+            onClick={onClose}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-[8px] text-sm text-muted hover:text-foreground border border-border hover:bg-white/5 transition-colors"
+          >
+            <IconX size={13} />
+            {done ? "Close" : "Cancel"}
+          </button>
+          {!done && (
+            <button
+              onClick={handleExport}
+              disabled={exporting || !modpackName.trim()}
+              className="flex items-center gap-1.5 px-5 py-2 rounded-[8px] text-sm font-semibold bg-[#22c55e] hover:bg-[#16a34a] text-black transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <IconPackageExport size={14} />
+              {exporting ? "Exporting..." : "Export"}
             </button>
-            {!done && (
-              <button onClick={handleExport} disabled={exporting || !modpackName.trim()}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-[10px] text-sm font-semibold bg-[#22c55e] hover:bg-[#16a34a] text-black transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-                <IconPackageExport size={14} />
-                {exporting ? "Exporting..." : "Export"}
-              </button>
-            )}
-          </div>
+          )}
         </div>
       </div>
     </div>,
@@ -1454,65 +1431,329 @@ function DotsDropdown({ onOpenFolder, onExport }: { onOpenFolder: () => void; on
   );
 }
 
+function ModpackDropdown({ value, onChange }: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", h);
+    return () => window.removeEventListener("mousedown", h);
+  }, [open]);
+
+  const selected = SUGGESTED_MODPACKS.find(m => m.slug === value);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center justify-between px-3 py-2 rounded-[15px] bg-field-background border border-border text-sm text-foreground hover:border-accent/40 transition-colors focus:outline-none"
+        style={{ backgroundColor: "var(--color-surface)" }}
+      >
+        <span className={selected?.slug ? "text-foreground" : "text-muted"}>
+          {selected?.name ?? "None"}
+        </span>
+        <IconChevronDown size={14} className="text-muted" />
+      </button>
+      {open && (
+        <div
+          className="absolute left-0 right-0 z-50 mb-1 bottom-full rounded-[15px] border border-border shadow-xl overflow-hidden"
+          style={{ backgroundColor: "var(--color-overlay)" }}
+        >
+          {SUGGESTED_MODPACKS.map(m => (
+            <button
+              key={m.slug}
+              type="button"
+              onClick={() => { onChange(m.slug); setOpen(false); }}
+              className={[
+                "w-full flex items-center justify-between px-3 py-2 text-sm transition-colors",
+                m.slug === value
+                  ? "text-accent bg-accent/10"
+                  : "text-foreground hover:bg-surface-secondary"
+              ].join(" ")}
+            >
+              {m.name}
+              {m.slug === value && <IconCheck size={12} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CreateModal({ onClose, onCreate }: { onClose: () => void; onCreate: (inst: LocalInstance) => void }) {
   const { versions, loading: loadingVersions } = useVersions();
   const [name, setName] = useState("");
-  const [loader, setLoader] = useState<Loader>("vanilla");
+  const [loader, setLoader] = useState<Loader>("fabric");
   const [version, setVersion] = useState("");
   const [iconSrc, setIconSrc] = useState<string | null>(null);
   const [bgSrc, setBgSrc] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [selectedModpack, setSelectedModpack] = useState<string>("");
+  const [fetchingModpack, setFetchingModpack] = useState(false);
+
   useEffect(() => { if (versions.length && !version) setVersion(versions[0].id); }, [versions]);
+
+  const handleModpackChange = async (slug: string) => {
+    setSelectedModpack(slug);
+    if (!slug) {
+      const isModpackName = !name.trim() || SUGGESTED_MODPACKS.some(m => m.name === name.trim());
+      if (isModpackName) setName("");
+      return;
+    }
+    setFetchingModpack(true);
+    try {
+      const found = SUGGESTED_MODPACKS.find(m => m.slug === slug);
+      if (found) {
+        const isModpackName = !name.trim() || SUGGESTED_MODPACKS.some(m => m.name === name.trim());
+        if (isModpackName) setName(found.name);
+      }
+      const res = await fetch(`https://api.modrinth.com/v2/project/${slug}/version`, {
+        headers: { "User-Agent": "Launcher/1.0" },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const modpackVersions = await res.json();
+      if (Array.isArray(modpackVersions) && modpackVersions.length > 0) {
+        const target = modpackVersions.find((v: any) => v.version_type === "release") || modpackVersions[0];
+        const targetGameVersion = target.game_versions?.[target.game_versions.length - 1] || target.game_versions?.[0];
+        if (targetGameVersion) setVersion(targetGameVersion);
+        const rawLoader = target.loaders?.[0];
+        if (rawLoader) {
+          const normalized = rawLoader.toLowerCase();
+          setLoader(["fabric", "forge", "neoforge", "vanilla"].includes(normalized) ? normalized as Loader : "fabric");
+        }
+      }
+    } catch (err) {
+      toast.danger("Error fetching modpack details", { description: String(err) });
+    } finally {
+      setFetchingModpack(false);
+    }
+  };
+
   const handleCreate = async () => {
     const title = name.trim();
     if (!title || saving) return;
     setSaving(true);
-    const inst: LocalInstance = {
-      id: slugify(title) || `inst-${Date.now()}`,
-      title, minecraft_version: version, loader,
-      icon_path: null, background_path: null, created_at: Date.now(),
-    };
-    try {
-      const created = await invoke<LocalInstance>("add_local_instance", { instance: inst, iconSrc: iconSrc ?? null, backgroundSrc: bgSrc ?? null });
-      onCreate(created);
-      onClose();
-    } catch (e) { toast.danger("Error creating instance", { description: String(e) }); }
-    finally { setSaving(false); }
+
+    if (selectedModpack) {
+      try {
+        const queryParams = new URLSearchParams({
+          game_versions: JSON.stringify([version]),
+          loaders: JSON.stringify([loader === "vanilla" ? "fabric" : loader]),
+        });
+        const res = await fetch(`https://api.modrinth.com/v2/project/${selectedModpack}/version?${queryParams}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const modpackVersions = await res.json();
+        if (modpackVersions.length === 0) throw new Error(`No compatible version found for ${version} / ${loader}`);
+        const targetVersion = modpackVersions[0];
+        const projRes = await fetch(`https://api.modrinth.com/v2/project/${selectedModpack}`);
+        if (!projRes.ok) throw new Error(`HTTP ${projRes.status}`);
+        const projData = await projRes.json();
+        let created = await invoke<LocalInstance>("install_modrinth_modpack", {
+          slug: selectedModpack,
+          title,
+          iconUrl: projData.icon_url || null,
+          versionId: targetVersion.id,
+        });
+        if (iconSrc || bgSrc) {
+          created = await updateLocalInstance(created.id, created.title, created.minecraft_version, created.loader, iconSrc, bgSrc, false, false);
+        }
+        onCreate(created);
+        onClose();
+      } catch (e) {
+        toast.danger("Error creating instance with modpack", { description: String(e) });
+      } finally {
+        setSaving(false);
+      }
+    } else {
+      const inst: LocalInstance = {
+        id: slugify(title) || `inst-${Date.now()}`,
+        title,
+        minecraft_version: version,
+        loader,
+        icon_path: null,
+        background_path: null,
+        created_at: Date.now(),
+      };
+      try {
+        const created = await invoke<LocalInstance>("add_local_instance", {
+          instance: inst,
+          icon_src: iconSrc ?? null,
+          background_src: bgSrc ?? null,
+        });
+        onCreate(created);
+        onClose();
+      } catch (e) {
+        toast.danger("Error creating instance", { description: String(e) });
+      } finally {
+        setSaving(false);
+      }
+    }
   };
+
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="rounded-[15px] w-[420px] flex flex-col gap-5 shadow-2xl border border-white/10 overflow-hidden"
-        style={{ backgroundColor: "var(--color-overlay)" }}>
-        <div className="flex items-center justify-between px-5 pt-5">
-          <span className="text-sm font-semibold text-foreground">Create instance</span>
-          <button onClick={onClose} className="text-muted hover:text-foreground transition-colors"><IconX size={16} /></button>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        className="rounded-[15px] w-[460px] flex flex-col shadow-2xl border border-white/10"
+        style={{ backgroundColor: "var(--color-overlay)" }}
+      >
+        <div className="flex items-center justify-between px-6 py-5">
+          <span className="text-base font-bold text-foreground">Create instance</span>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 flex items-center justify-center rounded-[10px] text-muted hover:text-foreground hover:bg-white/5 transition-colors"
+          >
+            <IconX size={16} />
+          </button>
         </div>
-        <div className="px-5 flex flex-col gap-4">
-          <TextField variant="secondary" value={name} onChange={setName}>
-            <Label className="text-xs text-muted mb-1">Name</Label>
-            <Input autoFocus placeholder="My survival instance..." onKeyDown={e => { if (e.key === "Enter" && name.trim()) handleCreate(); }} />
-          </TextField>
-          <div className="flex flex-col gap-2">
-            <span className="text-xs text-muted">Loader</span>
-            <div className="flex flex-wrap gap-1.5">{LOADERS.map(l => <LoaderPill key={l} value={l} selected={loader === l} onClick={() => setLoader(l)} />)}</div>
+
+        <div className="px-6 pb-5 flex flex-col gap-4">
+          <div className="flex items-center gap-4">
+            <div
+              onClick={async () => { const p = await pickImage(); if (p) setIconSrc(p); }}
+              className="w-16 h-16 rounded-[14px] border border-border flex items-center justify-center overflow-hidden flex-shrink-0 cursor-pointer hover:border-[#22c55e]/40 transition-colors relative group"
+              style={{ backgroundColor: "var(--color-surface)" }}
+            >
+              {iconSrc
+                ? <img src={toUrl(iconSrc) ?? ""} className="w-full h-full object-cover" alt="" />
+                : <IconBox size={24} className="text-muted" />}
+              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                <IconUpload size={14} className="text-white" />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <button
+                onClick={async () => { const p = await pickImage(); if (p) setIconSrc(p); }}
+                className="flex items-center gap-1.5 text-xs text-muted hover:text-foreground border border-border px-3 py-1.5 rounded-[9px] transition-colors w-fit"
+              >
+                <IconUpload size={11} /> Select icon
+              </button>
+              {iconSrc && (
+                <button
+                  onClick={() => setIconSrc(null)}
+                  className="flex items-center gap-1.5 text-xs text-muted hover:text-foreground border border-border px-3 py-1.5 rounded-[9px] transition-colors w-[116px]"
+                >
+                  <IconX size={11} /> Remove icon
+                </button>
+              )}
+            </div>
+
+            <div className="w-px h-12 self-center flex-shrink-0" style={{ backgroundColor: "rgba(255,255,255,0.06)" }} />
+
+            <div
+              onClick={async () => { const p = await pickImage(); if (p) setBgSrc(p); }}
+              className="w-16 h-16 rounded-[14px] border border-border flex items-center justify-center overflow-hidden flex-shrink-0 cursor-pointer hover:border-[#22c55e]/40 transition-colors relative group"
+              style={{ backgroundColor: "var(--color-surface)" }}
+            >
+              {bgSrc
+                ? <img src={toUrl(bgSrc) ?? ""} className="w-full h-full object-cover" alt="" />
+                : <IconPhoto size={24} className="text-muted" />}
+              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                <IconUpload size={14} className="text-white" />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <button
+                onClick={async () => { const p = await pickImage(); if (p) setBgSrc(p); }}
+                className="flex items-center gap-1.5 text-xs text-muted hover:text-foreground border border-border px-3 py-1.5 rounded-[9px] transition-colors w-fit"
+              >
+                <IconUpload size={11} /> Select bg
+              </button>
+              {bgSrc && (
+                <button
+                  onClick={() => setBgSrc(null)}
+                  className="flex items-center gap-1.5 text-xs text-muted hover:text-foreground border border-border px-3 py-1.5 rounded-[9px] transition-colors w-[108px]"
+                >
+                  <IconX size={11} /> Remove bg
+                </button>
+              )}
+            </div>
           </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-semibold text-foreground">Name</label>
+            <input
+              autoFocus
+              value={name}
+              onChange={e => setName(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && name.trim()) handleCreate(); }}
+              placeholder={`${loader.charAt(0).toUpperCase() + loader.slice(1)} ${version}`}
+              className="w-full px-3 py-2 rounded-[10px] border border-border bg-transparent text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-[#22c55e]/40 transition-colors"
+              style={{ backgroundColor: "var(--color-surface)" }}
+            />
+          </div>
+
           <div className="flex flex-col gap-2">
-            <span className="text-xs text-muted">Minecraft Version</span>
+            <label className="text-xs font-semibold text-foreground">Loader</label>
+            <div className="flex flex-wrap gap-1.5">
+              {(["vanilla", "fabric", "neoforge", "forge"] as Loader[]).map(l => (
+                <button
+                  key={l}
+                  type="button"
+                  onClick={() => setLoader(l)}
+                  className={[
+                    "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-all",
+                    loader === l
+                      ? "bg-[#22c55e]/15 border-[#22c55e]/40 text-[#22c55e]"
+                      : "bg-transparent border-border text-muted hover:text-foreground",
+                  ].join(" ")}
+                >
+                  {loader === l && <IconCheck size={11} />}
+                  {l.charAt(0).toUpperCase() + l.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label className="text-xs font-semibold text-foreground">Game version</label>
             <VersionDropdown value={version} onChange={setVersion} versions={versions} loading={loadingVersions} />
           </div>
-          <ImagePickRow label="Icon" previewSrc={iconSrc}
-            onPick={async () => { const p = await pickImage(); if (p) setIconSrc(p); }}
-            onClear={() => setIconSrc(null)} icon={<IconBox size={18} />} />
-          <ImagePickRow label="Background image" previewSrc={bgSrc}
-            onPick={async () => { const p = await pickImage(); if (p) setBgSrc(p); }}
-            onClear={() => setBgSrc(null)} icon={<IconPhoto size={18} />} />
+
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-foreground">Suggested modpack</label>
+              {fetchingModpack && (
+                <span className="text-[10px] text-accent flex items-center gap-1">
+                  <IconRefresh size={10} className="animate-spin" /> Fetching details...
+                </span>
+              )}
+            </div>
+            <ModpackDropdown value={selectedModpack} onChange={handleModpackChange} />
+          </div>
         </div>
-        <div className="flex gap-2 justify-end px-5 pb-5">
-          <Button variant="secondary" onPress={onClose}>Cancel</Button>
-          <Button onPress={handleCreate} isDisabled={!name.trim() || saving}>
-            <IconPlus size={14} /> {saving ? "Creating..." : "Create"}
-          </Button>
+
+        <div
+          className="flex items-center justify-end px-6 py-4 gap-2"
+          style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}
+        >
+          <button
+            onClick={onClose}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-[10px] border border-border text-sm text-muted hover:text-foreground hover:bg-white/5 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleCreate}
+            disabled={!name.trim() || saving || fetchingModpack}
+            className="flex items-center gap-1.5 px-5 py-2 rounded-[10px] text-sm font-semibold bg-[#22c55e] hover:bg-[#16a34a] text-black transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <IconPlus size={14} />
+            {saving ? "Creating..." : "Create instance"}
+          </button>
         </div>
       </div>
     </div>,
@@ -1535,6 +1776,7 @@ function EditModal({ instance, onClose, onSave, onDelete }: {
   const [saving, setSaving] = useState(false);
   const iconPreview = iconSrc ?? (clearIcon ? null : instance.icon_path ?? null);
   const bgPreview = bgSrc ?? (clearBg ? null : instance.background_path ?? null);
+
   const handleSave = async () => {
     if (!title.trim() || saving) return;
     setSaving(true);
@@ -1544,58 +1786,185 @@ function EditModal({ instance, onClose, onSave, onDelete }: {
     } catch (e) { toast.danger("Error saving", { description: String(e) }); }
     finally { setSaving(false); }
   };
+
   const handleDelete = async () => {
     try { await deleteLocalInstance(instance.id); onDelete(instance.id); onClose(); }
     catch (e) { toast.danger("Error deleting", { description: String(e) }); }
   };
+
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="rounded-[15px] w-[420px] flex flex-col gap-5 shadow-2xl border border-white/10 overflow-hidden"
-        style={{ backgroundColor: "var(--color-overlay)" }}>
-        <div className="flex items-center justify-between px-5 pt-5">
-          <span className="text-sm font-semibold text-foreground">Edit instance</span>
-          <button onClick={onClose} className="text-muted hover:text-foreground transition-colors"><IconX size={16} /></button>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        className="rounded-[15px] w-[460px] flex flex-col shadow-2xl border border-white/10"
+        style={{ backgroundColor: "var(--color-overlay)" }}
+      >
+        <div className="flex items-center justify-between px-6 py-5">
+          <span className="text-base font-bold text-foreground">Edit instance</span>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 flex items-center justify-center rounded-[10px] text-muted hover:text-foreground hover:bg-white/5 transition-colors"
+          >
+            <IconX size={16} />
+          </button>
         </div>
-        <div className="px-5 flex flex-col gap-4">
-          <TextField variant="secondary" value={title} onChange={setTitle}>
-            <Label className="text-xs text-muted mb-1">Name</Label>
-            <Input placeholder="Instance name" />
-          </TextField>
-          <div className="flex flex-col gap-2">
-            <span className="text-xs text-muted">Loader</span>
-            <div className="flex flex-wrap gap-1.5">{LOADERS.map(l => <LoaderPill key={l} value={l} selected={loader === l} onClick={() => setLoader(l)} />)}</div>
+
+        <div className="px-6 pb-5 flex flex-col gap-4">
+          <div className="flex items-center gap-4">
+            <div
+              onClick={async () => { const p = await pickImage(); if (p) { setIconSrc(p); setClearIcon(false); } }}
+              className="w-16 h-16 rounded-[14px] border border-border flex items-center justify-center overflow-hidden flex-shrink-0 cursor-pointer hover:border-[#22c55e]/40 transition-colors relative group"
+              style={{ backgroundColor: "var(--color-surface)" }}
+            >
+              {iconPreview
+                ? <img src={toUrl(iconPreview) ?? ""} className="w-full h-full object-cover" alt="" />
+                : <IconBox size={24} className="text-muted" />}
+              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                <IconUpload size={14} className="text-white" />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <button
+                onClick={async () => { const p = await pickImage(); if (p) { setIconSrc(p); setClearIcon(false); } }}
+                className="flex items-center gap-1.5 text-xs text-muted hover:text-foreground border border-border px-3 py-1.5 rounded-[9px] transition-colors w-fit whitespace-nowrap"
+              >
+                <IconUpload size={11} /> Select icon
+              </button>
+              {iconPreview && (
+                <button
+                  onClick={() => { setIconSrc(null); setClearIcon(true); }}
+                  className="flex items-center gap-1.5 text-xs text-muted hover:text-foreground border border-border px-3 py-1.5 rounded-[9px] transition-colors w-[116px] whitespace-nowrap"
+                >
+                  <IconX size={11} /> Remove icon
+                </button>
+              )}
+            </div>
+
+            <div className="w-px h-12 self-center flex-shrink-0" style={{ backgroundColor: "rgba(255,255,255,0.06)" }} />
+
+            <div
+              onClick={async () => { const p = await pickImage(); if (p) { setBgSrc(p); setClearBg(false); } }}
+              className="w-16 h-16 rounded-[14px] border border-border flex items-center justify-center overflow-hidden flex-shrink-0 cursor-pointer hover:border-[#22c55e]/40 transition-colors relative group"
+              style={{ backgroundColor: "var(--color-surface)" }}
+            >
+              {bgPreview
+                ? <img src={toUrl(bgPreview) ?? ""} className="w-full h-full object-cover" alt="" />
+                : <IconPhoto size={24} className="text-muted" />}
+              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                <IconUpload size={14} className="text-white" />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <button
+                onClick={async () => { const p = await pickImage(); if (p) { setBgSrc(p); setClearBg(false); } }}
+                className="flex items-center gap-1.5 text-xs text-muted hover:text-foreground border border-border px-3 py-1.5 rounded-[9px] transition-colors w-fit whitespace-nowrap"
+              >
+                <IconUpload size={11} /> Select bg
+              </button>
+              {bgPreview && (
+                <button
+                  onClick={() => { setBgSrc(null); setClearBg(true); }}
+                  className="flex items-center gap-1.5 text-xs text-muted hover:text-foreground border border-border px-3 py-1.5 rounded-[9px] transition-colors w-[108px] whitespace-nowrap"
+                >
+                  <IconX size={11} /> Remove bg
+                </button>
+              )}
+            </div>
           </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-semibold text-foreground">Name</label>
+            <input
+              autoFocus
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && title.trim()) handleSave(); }}
+              placeholder="Instance name"
+              className="w-full px-3 py-2 rounded-[10px] border border-border bg-transparent text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-[#22c55e]/40 transition-colors"
+              style={{ backgroundColor: "var(--color-surface)" }}
+            />
+          </div>
+
           <div className="flex flex-col gap-2">
-            <span className="text-xs text-muted">Minecraft Version</span>
+            <label className="text-xs font-semibold text-foreground">Loader</label>
+            <div className="flex flex-wrap gap-1.5">
+              {(["vanilla", "fabric", "neoforge", "forge"] as Loader[]).map(l => (
+                <button
+                  key={l}
+                  type="button"
+                  onClick={() => setLoader(l)}
+                  className={[
+                    "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-all",
+                    loader === l
+                      ? "bg-[#22c55e]/15 border-[#22c55e]/40 text-[#22c55e]"
+                      : "bg-transparent border-border text-muted hover:text-foreground",
+                  ].join(" ")}
+                >
+                  {loader === l && <IconCheck size={11} />}
+                  {l.charAt(0).toUpperCase() + l.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label className="text-xs font-semibold text-foreground">Game version</label>
             <VersionDropdown value={version} onChange={setVersion} versions={versions} loading={loadingVersions} />
           </div>
-          <ImagePickRow label="Icon" previewSrc={iconPreview}
-            onPick={async () => { const p = await pickImage(); if (p) { setIconSrc(p); setClearIcon(false); } }}
-            onClear={() => { setIconSrc(null); setClearIcon(true); }} icon={<IconBox size={18} />} />
-          <ImagePickRow label="Background image" previewSrc={bgPreview}
-            onPick={async () => { const p = await pickImage(); if (p) { setBgSrc(p); setClearBg(false); } }}
-            onClear={() => { setBgSrc(null); setClearBg(true); }} icon={<IconPhoto size={18} />} />
-          <div className="p-3 rounded-[12px] border border-danger/20 bg-danger/5 flex items-center justify-between">
+
+          <div className="p-3.5 rounded-[12px] border border-red-500/20 bg-red-500/5 flex items-center justify-between">
             <div>
-              <p className="text-xs font-medium text-danger">Delete instance</p>
+              <p className="text-xs font-semibold text-red-400">Delete instance</p>
               <p className="text-xs text-muted mt-0.5">Deletes the entire folder. This cannot be undone.</p>
             </div>
             {confirmDelete ? (
               <div className="flex gap-1.5">
-                <button onClick={() => setConfirmDelete(false)} className="text-xs text-muted border border-border px-2.5 py-1.5 rounded-[10px] hover:bg-white/5 transition-colors">Cancel</button>
-                <button onClick={handleDelete} className="text-xs text-danger border border-danger/30 px-2.5 py-1.5 rounded-[10px] hover:bg-danger/10 transition-colors">Confirm</button>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  className="text-xs text-muted border border-border px-3 py-1.5 rounded-[9px] hover:bg-white/5 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleDelete}
+                  className="text-xs text-red-400 border border-red-500/30 px-3 py-1.5 rounded-[9px] hover:bg-red-500/10 transition-colors font-semibold"
+                >
+                  Confirm delete
+                </button>
               </div>
             ) : (
-              <button onClick={() => setConfirmDelete(true)} className="flex items-center gap-1.5 text-xs text-danger border border-danger/30 px-2.5 py-1.5 rounded-[10px] hover:bg-danger/10 transition-colors">
+              <button
+                onClick={() => setConfirmDelete(true)}
+                className="flex items-center gap-1.5 text-xs text-red-400 border border-red-500/30 px-3 py-1.5 rounded-[9px] hover:bg-red-500/10 transition-colors"
+              >
                 <IconTrash size={12} /> Delete
               </button>
             )}
           </div>
         </div>
-        <div className="flex gap-2 justify-end px-5 pb-5">
-          <Button variant="secondary" onPress={onClose}>Cancel</Button>
-          <Button onPress={handleSave} isDisabled={!title.trim() || saving}>{saving ? "Saving..." : "Save"}</Button>
+
+        <div
+          className="flex items-center justify-end px-6 py-4 gap-2"
+          style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}
+        >
+          <button
+            onClick={onClose}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-[10px] border border-border text-sm text-muted hover:text-foreground hover:bg-white/5 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={!title.trim() || saving}
+            className="flex items-center gap-1.5 px-5 py-2 rounded-[10px] text-sm font-semibold bg-[#22c55e] hover:bg-[#16a34a] text-black transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <IconCheck size={14} />
+            {saving ? "Saving..." : "Save changes"}
+          </button>
         </div>
       </div>
     </div>,
@@ -2366,7 +2735,7 @@ function InstanceContentView({
             <IconArrowLeft size={14} /> Main menu
           </button>
           <button
-            onClick={isThisLaunched ? () => invoke("kill_minecraft") : handlePlay}
+            onClick={isThisLaunched ? () => invoke("stop_instance", { instanceId: instance.id }) : handlePlay}
             disabled={installProgress > 0 || installStatus !== ""}
             className={`flex items-center gap-2 px-5 py-2 rounded-[12px] text-sm font-bold text-black transition-colors disabled:opacity-50 disabled:cursor-not-allowed
               ${isThisLaunched 

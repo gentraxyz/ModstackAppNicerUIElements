@@ -406,7 +406,7 @@ pub async fn bedrock_install(
 
 #[cfg(target_os = "windows")]
 async fn windows_install(app: &AppHandle, ms_access_token: &str) -> Result<(), String> {
-    app.emit("install-status", "Authenticating with Xbox...").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": "bedrock", "status": "Authenticating with Xbox..." })).ok();
 
     let latest = windows_get_latest(ms_access_token).await?;
 
@@ -420,7 +420,7 @@ async fn windows_install(app: &AppHandle, ms_access_token: &str) -> Result<(), S
         .unwrap_or("minecraft.msixvc");
     let dest = install_dir.join(filename);
 
-    app.emit("install-status", "Downloading Minecraft Bedrock").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": "bedrock", "status": "Downloading Minecraft Bedrock" })).ok();
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
@@ -446,13 +446,13 @@ async fn windows_install(app: &AppHandle, ms_access_token: &str) -> Result<(), S
             let pct = (downloaded * 100 / total) as u32;
             if pct != last_pct {
                 last_pct = pct;
-                app.emit("install-progress", format!("{}/{}", downloaded, total)).ok();
+                app.emit("instance-progress", serde_json::json!({ "instanceId": "bedrock", "current": downloaded, "total": total })).ok();
             }
         }
     }
     drop(file);
 
-    app.emit("install-status", "Installing package...").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": "bedrock", "status": "Installing package..." })).ok();
 
     let output = Command::new("powershell")
         .args([
@@ -477,8 +477,8 @@ async fn windows_install(app: &AppHandle, ms_access_token: &str) -> Result<(), S
     fs::write(&version_file, &latest.version).ok();
     fs::remove_file(&dest).ok();
 
-    app.emit("install-status", format!("Bedrock {} installed successfully!", latest.version)).ok();
-    app.emit("install-done", ()).ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": "bedrock", "status": format!("Bedrock {} installed successfully!", latest.version) })).ok();
+    app.emit("instance-done", "bedrock").ok();
     app.emit("bedrock-installed", &latest.version).ok();
 
     Ok(())
@@ -486,7 +486,7 @@ async fn windows_install(app: &AppHandle, ms_access_token: &str) -> Result<(), S
 
 #[cfg(target_os = "linux")]
 async fn linux_install(app: &AppHandle) -> Result<(), String> {
-    app.emit("install-status", "Checking mcpelauncher...").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": "bedrock", "status": "Checking mcpelauncher..." })).ok();
 
     if !which_exists("mcpelauncher-client") {
         install_mcpelauncher(app).await?;
@@ -503,7 +503,7 @@ async fn linux_install(app: &AppHandle) -> Result<(), String> {
 
     let apk_path = data_dir.join(format!("minecraft-{}.apk", latest.version));
 
-    app.emit("install-status", format!("Downloading Bedrock {}...", latest.version)).ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": "bedrock", "status": format!("Downloading Bedrock {}...", latest.version) })).ok();
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
@@ -529,13 +529,13 @@ async fn linux_install(app: &AppHandle) -> Result<(), String> {
             let pct = (downloaded * 100 / total) as u32;
             if pct != last_pct {
                 last_pct = pct;
-                app.emit("install-progress", format!("{}/{}", downloaded, total)).ok();
+                app.emit("instance-progress", serde_json::json!({ "instanceId": "bedrock", "current": downloaded, "total": total })).ok();
             }
         }
     }
     drop(file);
 
-    app.emit("install-status", "Extracting game files...").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": "bedrock", "status": "Extracting game files..." })).ok();
 
     let versions_dir = dirs::home_dir()
         .unwrap_or_default()
@@ -565,8 +565,8 @@ async fn linux_install(app: &AppHandle) -> Result<(), String> {
 
     fs::remove_file(&apk_path).ok();
 
-    app.emit("install-status", format!("Bedrock {} installed successfully!", latest.version)).ok();
-    app.emit("install-done", ()).ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": "bedrock", "status": format!("Bedrock {} installed successfully!", latest.version) })).ok();
+    app.emit("instance-done", "bedrock").ok();
     app.emit("bedrock-installed", &latest.version).ok();
 
     Ok(())
@@ -574,7 +574,7 @@ async fn linux_install(app: &AppHandle) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 async fn install_mcpelauncher(app: &AppHandle) -> Result<(), String> {
-    app.emit("install-status", "Installing mcpelauncher...").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": "bedrock", "status": "Installing mcpelauncher..." })).ok();
 
     let distro = detect_linux_distro();
 
@@ -621,7 +621,7 @@ async fn install_mcpelauncher(app: &AppHandle) -> Result<(), String> {
         return Err(format!("Error installing mcpelauncher: {}", err));
     }
 
-    app.emit("install-status", "mcpelauncher installed successfully!").ok();
+    app.emit("instance-status", serde_json::json!({ "instanceId": "bedrock", "status": "mcpelauncher installed successfully!" })).ok();
     Ok(())
 }
 

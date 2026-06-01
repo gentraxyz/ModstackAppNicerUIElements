@@ -4,7 +4,6 @@ mod commands;
 mod core;
 mod utils;
 mod state;
-mod java_runtime;
 mod logger;
 mod discord;
 mod skin_server;
@@ -27,9 +26,17 @@ use tauri::Manager;
 struct PendingMrstack(std::sync::Mutex<Option<String>>);
  
 fn main() {
-    #[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")]
     {
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok() 
+            || std::env::var("XDG_SESSION_TYPE")
+                .map(|v| v == "wayland")
+                .unwrap_or(false);
+    
+        if !is_wayland {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        }
+        
         std::env::set_var("WEBKIT_FORCE_SANDBOX", "0");
     }
 
@@ -133,7 +140,9 @@ fn main() {
             register_local_instance_for_launch,
             get_instance_worlds,
             anyserver_get,
-            kill_minecraft,
+            stop_instance,
+            get_running_instances,
+            get_downloading_instances,
             get_instance_files,
             read_instance_file,
             write_instance_file,    
