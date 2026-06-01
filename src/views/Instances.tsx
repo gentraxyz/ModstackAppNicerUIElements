@@ -11,6 +11,7 @@ import {
   IconArrowLeft, IconPackageExport,
   IconFolder, IconAdjustments, IconPackageImport,
   IconStar, IconAlertCircle, IconTerminal2,
+  IconExternalLink, IconEye,
 } from "@tabler/icons-react";
 import { listen } from "@tauri-apps/api/event";
 import { useInstance } from "../stores/instanceContext";
@@ -2033,6 +2034,285 @@ function WorldsTab({ instance }: { instance: LocalInstance }) {
   );
 }
 
+interface ScreenshotInfo {
+  name: string;
+  path: string;
+  created: number;
+}
+
+function ScreenshotLightbox({
+  current, screenshots, onClose, onSelect, onDelete, onOpenNative
+}: {
+  current: ScreenshotInfo;
+  screenshots: ScreenshotInfo[];
+  onClose: () => void;
+  onSelect: (s: ScreenshotInfo) => void;
+  onDelete: (s: ScreenshotInfo) => void;
+  onOpenNative: (s: ScreenshotInfo) => void;
+}) {
+  const currentIndex = screenshots.findIndex(s => s.name === current.name);
+
+  const handlePrev = (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (currentIndex > 0) {
+      onSelect(screenshots[currentIndex - 1]);
+    } else {
+      onSelect(screenshots[screenshots.length - 1]);
+    }
+  };
+
+  const handleNext = (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (currentIndex < screenshots.length - 1) {
+      onSelect(screenshots[currentIndex + 1]);
+    } else {
+      onSelect(screenshots[0]);
+    }
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+      if (e.key === "ArrowLeft") handlePrev();
+      if (e.key === "ArrowRight") handleNext();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [currentIndex, screenshots]);
+
+  const srcUrl = convertFileSrc(current.path);
+
+  return createPortal(
+    <div 
+      className="fixed inset-0 z-50 flex flex-col bg-black/90 select-none animate-fade-in"
+      onClick={onClose}
+    >
+      <div 
+        className="flex items-center justify-between px-6 py-4 bg-black/40 border-b border-white/5 flex-shrink-0 backdrop-blur-md"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-white truncate" title={current.name}>{current.name}</p>
+          <p className="text-xs text-white/60 mt-0.5">
+            {currentIndex + 1} of {screenshots.length} • {timeAgo(new Date(current.created * 1000).toISOString())}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onOpenNative(current)}
+            title="Open in System Viewer"
+            className="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/80 hover:text-white transition-all cursor-pointer"
+          >
+            <IconExternalLink size={16} />
+          </button>
+          <button
+            onClick={() => onDelete(current)}
+            title="Delete Screenshot"
+            className="p-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-all cursor-pointer"
+          >
+            <IconTrash size={16} />
+          </button>
+          <button
+            onClick={onClose}
+            className="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/80 hover:text-white transition-all ml-2 cursor-pointer"
+          >
+            <IconX size={16} />
+          </button>
+        </div>
+      </div>
+
+      <div className="flex-1 relative flex items-center justify-center p-4">
+        <button
+          onClick={handlePrev}
+          className="absolute left-6 z-10 w-12 h-12 rounded-full bg-white/5 hover:bg-white/10 text-white/80 hover:text-white flex items-center justify-center border border-white/10 backdrop-blur-sm transition-all cursor-pointer"
+        >
+          <IconChevronLeft size={24} />
+        </button>
+
+        <img 
+          src={srcUrl} 
+          className="max-w-full max-h-[calc(100vh-140px)] object-contain rounded-lg shadow-2xl transition-all duration-300" 
+          alt={current.name} 
+          onClick={e => e.stopPropagation()}
+        />
+
+        <button
+          onClick={handleNext}
+          className="absolute right-6 z-10 w-12 h-12 rounded-full bg-white/5 hover:bg-white/10 text-white/80 hover:text-white flex items-center justify-center border border-white/10 backdrop-blur-sm transition-all cursor-pointer"
+        >
+          <IconChevronRight size={24} />
+        </button>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function ScreenshotsTab({ instance }: { instance: LocalInstance }) {
+  const [screenshots, setScreenshots] = useState<ScreenshotInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedScreenshot, setSelectedScreenshot] = useState<ScreenshotInfo | null>(null);
+
+  const loadScreenshots = () => {
+    setLoading(true);
+    invoke<ScreenshotInfo[]>("get_instance_screenshots", { instanceId: instance.id })
+      .then(setScreenshots)
+      .catch(e => console.error("Error loading screenshots:", e))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadScreenshots();
+  }, [instance.id]);
+
+  const handleDelete = async (screenshot: ScreenshotInfo, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    const confirmed = window.confirm(`Are you sure you want to delete "${screenshot.name}"?`);
+    if (!confirmed) return;
+
+    try {
+      await invoke("delete_instance_file", {
+        instanceId: instance.id,
+        filePath: `screenshots/${screenshot.name}`
+      });
+      toast(`Screenshot deleted`);
+      setScreenshots(prev => prev.filter(s => s.name !== screenshot.name));
+      if (selectedScreenshot?.name === screenshot.name) {
+        setSelectedScreenshot(null);
+      }
+    } catch (err) {
+      toast.danger("Error deleting screenshot", { description: String(err) });
+    }
+  };
+
+  const handleOpenNative = async (screenshot: ScreenshotInfo, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    try {
+      await invoke("open_instance_screenshot", {
+        instanceId: instance.id,
+        fileName: screenshot.name
+      });
+    } catch (err) {
+      toast.danger("Error opening screenshot", { description: String(err) });
+    }
+  };
+
+  const handleOpenFolder = async () => {
+    try {
+      await invoke("open_instance_screenshots_folder", {
+        instanceId: instance.id
+      });
+    } catch (err) {
+      toast.danger("Error opening screenshots folder", { description: String(err) });
+    }
+  };
+
+  if (loading) return (
+    <div className="flex items-center justify-center flex-1 h-full">
+      <IconRefresh size={20} className="text-muted animate-spin" />
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col flex-1 min-h-0 bg-transparent">
+      {/* Tab Control Bar */}
+      <div className="flex items-center justify-between px-5 py-3 border-b border-border flex-shrink-0">
+        <div className="flex items-center gap-2 text-xs text-muted">
+          <IconPhoto size={13} />
+          <span>{screenshots.length} {screenshots.length === 1 ? "screenshot" : "screenshots"}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={loadScreenshots}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[8px] border border-border text-xs text-muted hover:text-foreground hover:bg-white/5 transition-colors flex-shrink-0 cursor-pointer">
+            <IconRefresh size={12} /> Refresh
+          </button>
+          <button onClick={handleOpenFolder}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] text-xs font-semibold bg-white/5 border border-border text-foreground hover:bg-white/10 transition-colors flex-shrink-0 cursor-pointer"
+          >
+            <IconFolderOpen size={12} /> Open folder
+          </button>
+        </div>
+      </div>
+
+      {/* Grid Content */}
+      <div className="flex-1 overflow-y-auto p-5">
+        {screenshots.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full gap-3 opacity-40 py-20">
+            <IconPhoto size={48} className="text-muted" />
+            <p className="text-sm text-muted font-semibold">No screenshots found</p>
+            <p className="text-xs text-muted max-w-[250px] text-center leading-normal">
+              Press F2 in-game to take screenshots and they will appear here automatically.
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
+            {screenshots.map((s) => {
+              const srcUrl = convertFileSrc(s.path);
+              return (
+                <div key={s.name}
+                  onClick={() => setSelectedScreenshot(s)}
+                  className="group flex flex-col rounded-[15px] border border-border overflow-hidden cursor-pointer hover:border-white/20 hover:shadow-lg transition-all"
+                  style={{ backgroundColor: "var(--color-surface)" }}>
+                  
+                  {/* Image Container */}
+                  <div className="relative aspect-video bg-black/40 flex items-center justify-center overflow-hidden border-b border-border">
+                    <img src={srcUrl} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" alt={s.name} />
+                    
+                    {/* Action Overlay */}
+                    <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center gap-2 transition-opacity duration-200">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setSelectedScreenshot(s); }}
+                        title="View Fullscreen"
+                        className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-all border border-white/10 cursor-pointer"
+                      >
+                        <IconEye size={14} />
+                      </button>
+                      <button
+                        onClick={(e) => handleOpenNative(s, e)}
+                        title="Open in System Viewer"
+                        className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-all border border-white/10 cursor-pointer"
+                      >
+                        <IconExternalLink size={14} />
+                      </button>
+                      <button
+                        onClick={(e) => handleDelete(s, e)}
+                        title="Delete Screenshot"
+                        className="w-8 h-8 rounded-full bg-red-500/20 hover:bg-red-500/40 text-red-400 flex items-center justify-center transition-all border border-red-500/20 cursor-pointer"
+                      >
+                        <IconTrash size={14} />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Text Container */}
+                  <div className="p-3 min-w-0">
+                    <p className="text-xs font-semibold text-foreground truncate" title={s.name}>{s.name}</p>
+                    <p className="text-[10px] text-muted mt-1">
+                      {timeAgo(new Date(s.created * 1000).toISOString())}
+                    </p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Lightbox Modal */}
+      {selectedScreenshot && (
+        <ScreenshotLightbox
+          current={selectedScreenshot}
+          screenshots={screenshots}
+          onClose={() => setSelectedScreenshot(null)}
+          onSelect={setSelectedScreenshot}
+          onDelete={(s) => handleDelete(s)}
+          onOpenNative={(s) => handleOpenNative(s)}
+        />
+      )}
+    </div>
+  );
+}
+
 interface FileEntry {
   name: string;
   path: string;
@@ -2621,7 +2901,7 @@ function InstanceContentView({
   const [filter, setFilter] = useState<ContentFilter>("all");
   const [search, setSearch] = useState("");
   const [mods, setMods] = useState<InstalledMod[]>([]);
-  const [activeTab, setActiveTab] = useState<"Content" | "Files" | "Worlds" | "Logs">("Content");
+  const [activeTab, setActiveTab] = useState<"Content" | "Files" | "Worlds" | "Logs" | "Screenshots">("Content");
   const [loadingMods, setLoadingMods] = useState(false);
   const [instanceLogger, setInstanceLogger] = useState<InstanceLog[]>([]);
   const logRef = useRef<HTMLDivElement>(null);
@@ -2753,13 +3033,14 @@ function InstanceContentView({
       </div>
 
       <div className="flex items-center gap-0.5 px-5 py-2 border-b border-border">
-        {(["Content", "Files", "Worlds", "Logs"] as const).map(tab => (
+        {(["Content", "Files", "Worlds", "Logs", "Screenshots"] as const).map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)}
             className={["flex items-center gap-1.5 px-4 py-1.5 rounded-[10px] text-sm font-medium transition-all",
               activeTab === tab ? "bg-[#22c55e] text-black" : "text-muted hover:text-foreground hover:bg-white/5"].join(" ")}>
             {tab === "Content" && <span className="w-2 h-2 rounded-full bg-current opacity-80" />}
             {tab === "Files" && <IconFolderOpen size={13} />}
             {tab === "Worlds" && <IconBox size={13} />}
+            {tab === "Screenshots" && <IconPhoto size={13} />}
             {tab === "Logs" && (
               <span className="relative flex items-center">
                 <IconTerminal2 size={13} />
@@ -2777,7 +3058,7 @@ function InstanceContentView({
         ))}
       </div>
 
-      {activeTab !== "Logs" && activeTab !== "Worlds" && activeTab !== "Files" && (
+      {activeTab !== "Logs" && activeTab !== "Worlds" && activeTab !== "Files" && activeTab !== "Screenshots" && (
         <>
           <div className="flex items-center gap-2 px-5 py-2.5 border-b border-border flex-wrap">
             <div className="relative" style={{ minWidth: 180, flex: "1 1 180px", maxWidth: 500 }}>
@@ -2825,8 +3106,12 @@ function InstanceContentView({
       {activeTab === "Worlds" && (
         <WorldsTab instance={instance} />
       )}
+
+      {activeTab === "Screenshots" && (
+        <ScreenshotsTab instance={instance} />
+      )}
     
-      {activeTab !== "Logs" && activeTab !== "Worlds" && activeTab !== "Files" && (
+      {activeTab !== "Logs" && activeTab !== "Worlds" && activeTab !== "Files" && activeTab !== "Screenshots" && (
         <div className="flex-1 overflow-y-auto">
           {loadingMods ? (
             <div className="flex items-center justify-center h-full opacity-30"><IconRefresh size={24} className="text-muted animate-spin" /></div>

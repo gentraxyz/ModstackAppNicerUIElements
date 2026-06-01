@@ -1847,3 +1847,61 @@ pub fn get_instance_playtime(app: AppHandle, instance_id: String) -> u64 {
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenshotInfo {
+    pub name: String,
+    pub path: String,
+    pub created: i64,
+}
+
+#[command]
+pub fn get_instance_screenshots(app: AppHandle, instance_id: String) -> Vec<ScreenshotInfo> {
+    let dir = instance_dir(&app, &instance_id).join("screenshots");
+    if !dir.exists() {
+        return vec![];
+    }
+    let mut screenshots = vec![];
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    let ext_str = ext.to_string_lossy().to_lowercase();
+                    if ext_str == "png" || ext_str == "jpg" || ext_str == "jpeg" {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let created = entry.metadata()
+                            .and_then(|m| m.modified())
+                            .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
+                            .unwrap_or(0);
+                        screenshots.push(ScreenshotInfo {
+                            name,
+                            path: path.to_string_lossy().to_string(),
+                            created,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    screenshots.sort_by(|a, b| b.created.cmp(&a.created));
+    screenshots
+}
+
+#[command]
+pub fn open_instance_screenshot(app: AppHandle, instance_id: String, file_name: String) -> Result<(), String> {
+    let dir = instance_dir(&app, &instance_id).join("screenshots").join(&file_name);
+    if !dir.exists() {
+        return Err(format!("File not found: {}", dir.display()));
+    }
+    open::that(&dir).map_err(|e| e.to_string())
+}
+
+#[command]
+pub fn open_instance_screenshots_folder(app: AppHandle, instance_id: String) -> Result<(), String> {
+    let dir = instance_dir(&app, &instance_id).join("screenshots");
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    open::that(&dir).map_err(|e| e.to_string())
+}

@@ -149,6 +149,9 @@ fn main() {
             delete_instance_file,
             rename_instance_file,
             get_instance_playtime,
+            get_instance_screenshots,
+            open_instance_screenshot,
+            open_instance_screenshots_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri");
